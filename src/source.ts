@@ -15,8 +15,8 @@ export class FolderError extends Error {
     }
 }
 
-const unsupported = (detail: string): never => {throw new FolderError('unsupported', detail);};
-const isObject = (value: Json | undefined): value is JsonObject => value !== null && typeof value === 'object' && !Array.isArray(value);
+export const unsupported = (detail: string): never => {throw new FolderError('unsupported', detail);};
+export const isObject = (value: Json | undefined): value is JsonObject => value !== null && typeof value === 'object' && !Array.isArray(value);
 const readObject = (text: string): JsonObject => {
     const value = JSON.parse(text);
     if (!isObject(value)) return unsupported('Expected a JSON object');
@@ -53,14 +53,17 @@ export interface Storage {
 }
 
 type FolderFiles = {
+    versions: Map<string, string>;
     files: Map<string, Uint8Array>;
     directory: FileSystemDirectoryHandle;
     bytes: Map<string, Uint8Array>;
 };
 export type FolderSource = FolderFiles & {project: Project; projectText: string; storageAssets: Map<string, Asset>};
 
-const readBytes = async (dir: FileSystemDirectoryHandle, name: string) =>
-    new Uint8Array(await (await (await dir.getFileHandle(name)).getFile()).arrayBuffer());
+const getFile = async (dir: FileSystemDirectoryHandle, name: string) => (await dir.getFileHandle(name)).getFile();
+const fileVersion = (file: File) => `${file.size}:${file.lastModified}`;
+const fileBytes = async (file: File) => new Uint8Array(await file.arrayBuffer());
+const readBytes = async (dir: FileSystemDirectoryHandle, name: string) => fileBytes(await getFile(dir, name));
 const readNames = async (dir: FileSystemDirectoryHandle) => {
     const names = new Set<string>();
     // Directory iteration is available alongside the picker, but absent from older DOM typings.
@@ -78,8 +81,14 @@ const sameNames = (actual: Set<string>, expected: Iterable<string>) => {
 export const assetKey = (type: AssetType, id: string, format: string) => `${type.name}/${id}.${format}`;
 
 export async function readFolder(directory: FileSystemDirectoryHandle, storage: Storage): Promise<FolderSource> {
+    const versions = new Map<string, string>();
+    const readEntry = async (dir: FileSystemDirectoryHandle, name: string, prefix = '') => {
+        const file = await getFile(dir, name);
+        versions.set(prefix + name, fileVersion(file));
+        return [name, await fileBytes(file)] as const;
+    };
     const filenames = [projectFile, manifestFile, extensionsFile];
-    const files = new Map(await Promise.all(filenames.map(async name => [name, await readBytes(directory, name)] as const)));
+    const files = new Map(await Promise.all(filenames.map(name => readEntry(directory, name))));
     const decoder = new TextDecoder('utf-8', {fatal: true});
     const projectText = decoder.decode(files.get(projectFile));
     const project = parseProject(projectText);
@@ -124,17 +133,50 @@ export async function readFolder(directory: FileSystemDirectoryHandle, storage: 
     if (!sameNames(await readNames(assets), expected) || (await readNames(extensions)).size) {
         return unsupported('Unexpected or missing source files');
     }
-    const bytes = new Map(await Promise.all([...expected].map(async name => [name, await readBytes(assets, name)] as const)));
+    const bytes = new Map(await Promise.all([...expected].map(name => readEntry(assets, name, 'assets/'))));
     const storageAssets = new Map<string, Asset>();
     for (const [key, {id, format, type, name}] of references) {
         const asset = storage.createAsset(type, format, bytes.get(name)!.slice(), null, true);
         if (asset.assetId !== id) return unsupported(`Asset hash mismatch: ${name}`);
         storageAssets.set(key, asset);
     }
-    return {files, directory, bytes, project, projectText, storageAssets};
+    return {versions, files, directory, bytes, project, projectText, storageAssets};
 }
 
 const sameBytes = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((value, index) => value === b[index]);
+
+export type FolderUpdate = {version: string; bytes: Uint8Array; project: Project};
+type DiskChange = FolderUpdate | 'blocked' | null;
+
+// Metadata probes do not read file contents. Only a changed project JSON can be applied here.
+export async function readFolderUpdate(source: FolderSource, previous: FolderUpdate | null): Promise<DiskChange> {
+    const {directory, versions} = source;
+    try {
+        const [assets, extensions, project] = await Promise.all([
+            directory.getDirectoryHandle('assets'), directory.getDirectoryHandle('extensions'), getFile(directory, projectFile)
+        ]);
+        const [assetNames, extensionNames] = await Promise.all([readNames(assets), readNames(extensions)]);
+        if (!sameNames(assetNames, source.bytes.keys()) || extensionNames.size) return 'blocked';
+        const unchanged = await Promise.all([
+            ...[manifestFile, extensionsFile].map(async name => fileVersion(await getFile(directory, name)) === versions.get(name)),
+            ...[...assetNames].map(async name => fileVersion(await getFile(assets, name)) === versions.get(`assets/${name}`))
+        ]);
+        if (unchanged.includes(false)) return 'blocked';
+        const version = fileVersion(project);
+        if (version === versions.get(projectFile)) return null;
+        if (previous?.version === version) return previous;
+        const bytes = await fileBytes(project);
+        // An editor may update the timestamp without changing the bytes, including our own save.
+        if (sameBytes(bytes, source.files.get(projectFile)!)) {
+            versions.set(projectFile, version);
+            return null;
+        }
+        return {version, bytes, project: parseProject(new TextDecoder('utf-8', {fatal: true}).decode(bytes))};
+    } catch {
+        // A transient invalid or incomplete external write is retried on the next scan.
+        return 'blocked';
+    }
+}
 
 export async function assertFolderUnchanged(source: FolderSource) {
     try {
@@ -155,7 +197,7 @@ export async function assertFolderUnchanged(source: FolderSource) {
     }
 }
 
-const equal = (left: Json, right: Json): boolean => {
+export const equal = (left: Json | undefined, right: Json | undefined): boolean => {
     if (left === right) return true;
     if (Array.isArray(left) && Array.isArray(right)) {
         return left.length === right.length && left.every((item, index) => equal(item, right[index]));
