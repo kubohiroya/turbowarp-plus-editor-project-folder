@@ -1,9 +1,12 @@
-import {assetKey, assertFolderUnchanged, FolderError, parseProject, projectChanges, projectFile, readFolder} from './source.js';
-import type {Asset, FolderSource, Project, Storage} from './source.js';
+import {assetKey, assertFolderUnchanged, FolderError, parseProject, projectChanges, projectFile, readFolder, readFolderUpdate} from './source.js';
+import type {Asset, FolderSource, FolderUpdate, Project, Storage} from './source.js';
+import {applyBlockReload, planBlockReload} from './block-reload.js';
+import type {ReloadTarget} from './block-reload.js';
 
 export interface FolderVM {
     runtime: {
         storage: Storage;
+        targets?: readonly ReloadTarget[];
         getTargetForStage(): object | null;
         on(event: 'PROJECT_LOADED', listener: () => void): void;
         off(event: 'PROJECT_LOADED', listener: () => void): void;
@@ -37,9 +40,16 @@ export interface FolderHost {
     beforeLoad(): void;
     onOpened(title: string): void;
     onSaved(): void;
+    blockReload?: {
+        isRunning(): boolean;
+        subscribe(listener: () => void): () => void;
+        onApplied(targets: readonly ReloadTarget[]): void;
+    };
 }
 
-type Session = {source: FolderSource; baseline: Project; stage: object};
+type PendingUpdate = {update: FolderUpdate; edits: ReturnType<typeof planBlockReload> | null};
+type Session = {source: FolderSource; baseline: Project; stage: object; pending: PendingUpdate | 'blocked' | null};
+export type ReloadState = 'ready' | 'dirty' | 'running' | 'busy' | 'blocked' | null;
 export type OpenResult = 'opened' | 'cancelled';
 export type SaveResult = 'saved' | 'unchanged';
 
@@ -48,6 +58,7 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
     let busy = false;
     let disposed = false;
     let revision = 0;
+    let scanning: Promise<void> | null = null;
     const snapshot = () => parseProject(vm.toJSON(undefined, {allowOptimization: false}));
     const changed = () => {revision++;};
     const loaded = () => {current = null;};
@@ -93,16 +104,79 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
             }
             if (disposed || !stage || vm.runtime.getTargetForStage() !== stage) return 'cancelled';
             host.onOpened(directory.name);
-            current = {source, stage, baseline: snapshot()};
+            current = {source, stage, baseline: snapshot(), pending: null};
             vm.renderer?.draw();
             return 'opened';
         } finally {
             busy = false;
         }
     };
+    const readUpdate = async (session: Session): Promise<Session['pending']> => {
+        const previous = session.pending;
+        const update = await readFolderUpdate(session.source, previous && previous !== 'blocked' ? previous.update : null);
+        if (!update || update === 'blocked') return update;
+        if (previous && previous !== 'blocked' && previous.update === update) return previous;
+        try {
+            return {update, edits: planBlockReload(session.source.project, update.project)};
+        } catch (error) {
+            if (!(error instanceof FolderError)) throw error;
+            return {update, edits: null};
+        }
+    };
+    const reloadState = (): ReloadState => {
+        const pending = current?.pending;
+        if (!pending) return null;
+        if (busy) return 'busy';
+        if (host.isProjectDirty()) return 'dirty';
+        if (host.blockReload?.isRunning()) return 'running';
+        return pending === 'blocked' || pending.edits === null ? 'blocked' : 'ready';
+    };
+    const canApply = () => !host.isProjectDirty() && !host.blockReload?.isRunning();
     return {
         get canSave() {return current !== null;},
         get busy() {return busy;},
+        get reloadState() {return reloadState();},
+        refresh(): Promise<void> {
+            if (disposed || busy || !current || !host.blockReload) return Promise.resolve();
+            if (scanning) return scanning;
+            const session = current;
+            const baseline = session.baseline;
+            scanning = readUpdate(session).then(pending => {
+                if (current === session && session.baseline === baseline && !busy) session.pending = pending;
+            }).finally(() => {scanning = null;});
+            return scanning;
+        },
+        async reload(): Promise<boolean> {
+            if (!current || reloadState() !== 'ready' || !host.blockReload) return false;
+            const session = current;
+            active(session);
+            busy = true;
+            try {
+                const editRevision = revision;
+                const pending = await readUpdate(session);
+                if (current !== session || disposed || vm.runtime.getTargetForStage() !== session.stage) return false;
+                session.pending = pending;
+                if (!pending || pending === 'blocked' || pending.edits === null || editRevision !== revision || !canApply()) {
+                    return false;
+                }
+                let targets: readonly ReloadTarget[];
+                try {
+                    targets = applyBlockReload(vm.runtime.targets ?? [], pending.edits);
+                } catch (error) {
+                    if (error instanceof FolderError) session.pending = {...pending, edits: null};
+                    throw error;
+                }
+                session.baseline = snapshot();
+                session.source.project = pending.update.project;
+                session.source.files.set(projectFile, pending.update.bytes);
+                session.source.versions.set(projectFile, pending.update.version);
+                session.pending = null;
+                host.blockReload.onApplied(targets);
+                return true;
+            } finally {
+                busy = false;
+            }
+        },
         open(pick: FileSystemPicker, confirmReplace: () => boolean): Promise<OpenResult> {
             return openFrom(async () => {
                 try {
@@ -146,7 +220,9 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
                 }
                 session.source.project = result;
                 session.source.files.set(projectFile, new TextEncoder().encode(text));
+                session.source.versions.delete(projectFile);
                 session.baseline = edited;
+                session.pending = null;
                 if (current === session && revision === saveRevision) host.onSaved();
                 return 'saved';
             } finally {
