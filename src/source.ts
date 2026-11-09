@@ -146,9 +146,10 @@ export async function readFolder(directory: FileSystemDirectoryHandle, storage: 
 const sameBytes = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((value, index) => value === b[index]);
 
 export type FolderUpdate = {version: string; bytes: Uint8Array; project: Project};
-type DiskChange = FolderUpdate | 'blocked' | null;
+export type DiskChange = FolderUpdate | 'structure' | 'waiting' | null;
 
-// Metadata probes do not read file contents. Only a changed project JSON can be applied here.
+// Metadata probes do not read file contents. Only a changed project JSON can be applied partially; changes to
+// assets, the manifest or extensions report 'structure' so that the host can offer a whole reload instead.
 export async function readFolderUpdate(source: FolderSource, previous: FolderUpdate | null): Promise<DiskChange> {
     const {directory, versions} = source;
     try {
@@ -156,12 +157,12 @@ export async function readFolderUpdate(source: FolderSource, previous: FolderUpd
             directory.getDirectoryHandle('assets'), directory.getDirectoryHandle('extensions'), getFile(directory, projectFile)
         ]);
         const [assetNames, extensionNames] = await Promise.all([readNames(assets), readNames(extensions)]);
-        if (!sameNames(assetNames, source.bytes.keys()) || extensionNames.size) return 'blocked';
+        if (!sameNames(assetNames, source.bytes.keys()) || extensionNames.size) return 'structure';
         const unchanged = await Promise.all([
             ...[manifestFile, extensionsFile].map(async name => fileVersion(await getFile(directory, name)) === versions.get(name)),
             ...[...assetNames].map(async name => fileVersion(await getFile(assets, name)) === versions.get(`assets/${name}`))
         ]);
-        if (unchanged.includes(false)) return 'blocked';
+        if (unchanged.includes(false)) return 'structure';
         const version = fileVersion(project);
         if (version === versions.get(projectFile)) return null;
         if (previous?.version === version) return previous;
@@ -172,9 +173,10 @@ export async function readFolderUpdate(source: FolderSource, previous: FolderUpd
             return null;
         }
         return {version, bytes, project: parseProject(new TextDecoder('utf-8', {fatal: true}).decode(bytes))};
-    } catch {
-        // A transient invalid or incomplete external write is retried on the next scan.
-        return 'blocked';
+    } catch (error) {
+        // Well-formed JSON outside the partial scope needs a whole reload. Anything else may be a write in
+        // progress, such as truncated JSON or a file replaced between the probe and the read, and is retried.
+        return error instanceof FolderError ? 'structure' : 'waiting';
     }
 }
 

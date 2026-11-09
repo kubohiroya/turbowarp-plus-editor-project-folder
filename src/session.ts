@@ -47,9 +47,17 @@ export interface FolderHost {
     };
 }
 
-type PendingUpdate = {update: FolderUpdate; edits: ReturnType<typeof planBlockReload> | null};
-type Session = {source: FolderSource; baseline: Project; stage: object; pending: PendingUpdate | 'blocked' | null};
-export type ReloadState = 'ready' | 'dirty' | 'running' | 'busy' | 'blocked' | null;
+// `stable` turns true once two scans see the same file version, so consecutive writes settle before auto-apply.
+type PendingUpdate = {update: FolderUpdate; edits: ReturnType<typeof planBlockReload> | null; stable: boolean};
+type Pending = PendingUpdate | 'structure' | 'waiting';
+type Session = {source: FolderSource; baseline: Project; stage: object; pending: Pending | null};
+/**
+ * `ready`: values and positions can be applied in place. `full`: the change needs the whole project reloaded.
+ * `waiting`: an external write looks incomplete and is checked again. `dirty`, `running` and `busy` hold the change.
+ */
+export type ReloadState = 'ready' | 'full' | 'waiting' | 'dirty' | 'running' | 'busy' | null;
+/** What the reload command does for the pending change, regardless of whether it may run now. */
+export type ReloadKind = 'partial' | 'full' | null;
 export type OpenResult = 'opened' | 'cancelled';
 export type SaveResult = 'saved' | 'unchanged';
 
@@ -112,24 +120,30 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
         }
     };
     const readUpdate = async (session: Session): Promise<Session['pending']> => {
-        const previous = session.pending;
-        const update = await readFolderUpdate(session.source, previous && previous !== 'blocked' ? previous.update : null);
-        if (!update || update === 'blocked') return update;
-        if (previous && previous !== 'blocked' && previous.update === update) return previous;
+        const previous = typeof session.pending === 'object' ? session.pending : null;
+        const update = await readFolderUpdate(session.source, previous?.update ?? null);
+        if (!update || typeof update === 'string') return update;
+        if (previous?.update === update) return {...previous, stable: true};
         try {
-            return {update, edits: planBlockReload(session.source.project, update.project)};
+            return {update, edits: planBlockReload(session.source.project, update.project), stable: false};
         } catch (error) {
             if (!(error instanceof FolderError)) throw error;
-            return {update, edits: null};
+            return {update, edits: null, stable: false};
         }
+    };
+    const reloadKind = (): ReloadKind => {
+        const pending = current?.pending;
+        if (!pending || pending === 'waiting') return null;
+        return pending === 'structure' || pending.edits === null ? 'full' : 'partial';
     };
     const reloadState = (): ReloadState => {
         const pending = current?.pending;
         if (!pending) return null;
         if (busy) return 'busy';
+        if (pending === 'waiting') return 'waiting';
         if (host.isProjectDirty()) return 'dirty';
         if (host.blockReload?.isRunning()) return 'running';
-        return pending === 'blocked' || pending.edits === null ? 'blocked' : 'ready';
+        return reloadKind() === 'full' ? 'full' : 'ready';
     };
     const canApply = () => !host.isProjectDirty() && !host.blockReload?.isRunning();
     return {
@@ -137,6 +151,23 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
         get canSave() {return current !== null;},
         get busy() {return busy;},
         get reloadState() {return reloadState();},
+        get reloadKind() {return reloadKind();},
+        /** A partial change that has stayed the same across two scans and may be applied without asking. */
+        get canAutoReload() {
+            const pending = current?.pending;
+            return reloadState() === 'ready' && typeof pending === 'object' && pending !== null && pending.stable;
+        },
+        /** True while a change is new or looks incomplete, so a host can look again sooner than its interval. */
+        get settling() {
+            const pending = current?.pending;
+            return pending === 'waiting' || (typeof pending === 'object' && pending !== null && !pending.stable);
+        },
+        /** Identifies the pending project file version, so a host can attempt an automatic apply only once. */
+        get pendingVersion() {
+            const pending = current?.pending;
+            return typeof pending === 'object' && pending !== null ? pending.update.version : null;
+        },
+        get directory() {return current?.source.directory ?? null;},
         refresh(): Promise<void> {
             if (disposed || busy || !current || !host.blockReload) return Promise.resolve();
             if (scanning) return scanning;
@@ -157,7 +188,7 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
                 const pending = await readUpdate(session);
                 if (current !== session || disposed || vm.runtime.getTargetForStage() !== session.stage) return false;
                 session.pending = pending;
-                if (!pending || pending === 'blocked' || pending.edits === null || editRevision !== revision || !canApply()) {
+                if (!pending || typeof pending === 'string' || pending.edits === null || editRevision !== revision || !canApply()) {
                     return false;
                 }
                 let targets: readonly ReloadTarget[];
@@ -177,6 +208,17 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
             } finally {
                 busy = false;
             }
+        },
+        /**
+         * Reads the open folder again and replaces the project, for changes a partial reload cannot apply. Unsaved
+         * edits are discarded only when `confirmReplace` agrees. The VM is left untouched while a project runs.
+         */
+        reloadAll(confirmReplace: () => boolean): Promise<OpenResult> {
+            const session = current;
+            if (!session || !session.pending || session.pending === 'waiting' || host.blockReload?.isRunning()) {
+                return Promise.resolve('cancelled');
+            }
+            return openFrom(() => Promise.resolve(current === session ? session.source.directory : null), confirmReplace);
         },
         open(pick: FileSystemPicker, confirmReplace: () => boolean): Promise<OpenResult> {
             return openFrom(async () => {
