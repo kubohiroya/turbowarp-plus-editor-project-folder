@@ -102,7 +102,7 @@ export async function readFolder(directory: FileSystemDirectoryHandle, storage: 
         (embedded.extensionBundles !== undefined && (!Array.isArray(embedded.extensionBundles) || embedded.extensionBundles.length)) ||
         project.turboWarpPlus !== undefined || project.customFonts !== undefined ||
         (project.extensionURLs !== undefined && (!isObject(project.extensionURLs) || Object.keys(project.extensionURLs).length))) {
-        return unsupported('Custom extensions and fonts are outside the prototype scope');
+        return unsupported('Custom extensions and fonts are not supported in project folders');
     }
     const expected = new Set(['project.json']);
     const references = new Map<string, {id: string; format: string; type: AssetType; name: string}>();
@@ -210,8 +210,17 @@ export const equal = (left: Json | undefined, right: Json | undefined): boolean 
         keys.every(key => Object.hasOwn(right, key) && equal(left[key], right[key]));
 };
 
+// Items that name themselves (monitors, costumes) must be the same item in the folder and in the Editor.
+const sameIdentity = (left: Json, right: Json) => !isObject(left) || !isObject(right) ||
+    ['id', 'assetId', 'name', 'opcode'].every(key => !Object.hasOwn(left, key) || !Object.hasOwn(right, key) || equal(left[key], right[key]));
 const applyChanges = (source: Json | undefined, before: Json, after: Json): Json => {
     if (equal(before, after)) return source === undefined ? after : source;
+    // Lists of the same length, such as costumes or a block input, change item by item to keep unknown fields.
+    if (Array.isArray(before) && Array.isArray(after) && Array.isArray(source) &&
+        before.length === after.length && source.length === after.length &&
+        source.every((item, index) => sameIdentity(item, before[index]))) {
+        return after.map((item, index) => applyChanges(source[index], before[index], item));
+    }
     if (!isObject(before) || !isObject(after)) return after;
     const result: JsonObject = Object.assign(Object.create(null), isObject(source) ? source : {});
     for (const key of Object.keys(before)) {
@@ -226,31 +235,58 @@ const applyChanges = (source: Json | undefined, before: Json, after: Json): Json
     return result;
 };
 
-export function projectChanges(source: Project, before: Project, after: Project): Project | null {
-    const {targets: beforeTargets, ...beforeOther} = before;
-    const {targets: afterTargets, ...afterOther} = after;
-    if (!equal(beforeOther, afterOther) || !equal(beforeTargets.map(targetKey), afterTargets.map(targetKey))) {
-        return unsupported('This prototype saves block edits on existing targets only');
-    }
-    const edits = new Map<string, Partial<Pick<Target, 'blocks' | 'comments'>>>();
-    const originalTargets = new Map(source.targets.map(target => [targetKey(target), target]));
-    for (const [index, target] of afterTargets.entries()) {
-        const {blocks, comments, ...rest} = target;
-        const {blocks: priorBlocks, comments: priorComments, ...priorRest} = beforeTargets[index];
-        if (!equal(rest, priorRest)) return unsupported('This prototype saves block edits on existing targets only');
-        const key = targetKey(target);
-        const original = originalTargets.get(key);
-        if (!original) return unsupported('The original target could not be identified');
-        if (!equal(priorBlocks, blocks) || !equal(priorComments, comments)) {
-            const changes: Partial<Pick<Target, 'blocks' | 'comments'>> = {};
-            if (!equal(priorBlocks, blocks)) changes.blocks = applyChanges(original.blocks, priorBlocks, blocks);
-            if (!equal(priorComments, comments)) changes.comments = applyChanges(original.comments, priorComments, comments);
-            edits.set(key, changes);
+const assetNames = (project: Project) => {
+    const names = new Set<string>();
+    for (const target of project.targets) {
+        for (const kind of ['costumes', 'sounds'] as const) {
+            const entries = target[kind];
+            if (!Array.isArray(entries)) continue;
+            for (const entry of entries) if (isObject(entry) && typeof entry.md5ext === 'string') names.add(entry.md5ext);
         }
     }
-    if (!edits.size) return null;
-    return {...source, targets: source.targets.map(target => {
-        const edit = edits.get(targetKey(target));
-        return edit ? {...target, ...edit} : target;
-    })};
+    return names;
+};
+const customContent = (project: Project) => project.turboWarpPlus !== undefined || project.customFonts !== undefined ||
+    (project.extensionURLs !== undefined && (!isObject(project.extensionURLs) || Object.keys(project.extensionURLs).length > 0));
+
+/**
+ * Applies the edits between `before` and `after` (both from the VM) to the project read from the folder, keeping the
+ * fields and order the VM does not know. Saves change only the project file: the stage and sprites keep their names,
+ * and the costumes and sounds keep using the asset files already in the folder. Returns `null` without edits.
+ */
+export function projectChanges(source: Project, before: Project, after: Project): Project | null {
+    const keys = (project: Project) => project.targets.map(targetKey);
+    const beforeKeys = keys(before), afterKeys = keys(after);
+    if (beforeKeys.length !== afterKeys.length || !afterKeys.every(key => beforeKeys.includes(key))) {
+        return unsupported('Adding, removing or renaming sprites is not saved to a project folder yet');
+    }
+    const used = assetNames(after), known = assetNames(before);
+    if (used.size !== known.size || [...used].some(name => !known.has(name))) {
+        return unsupported('Adding or removing costumes and sounds is not saved to a project folder yet');
+    }
+    if (customContent(after)) return unsupported('Custom extensions and fonts are not saved to a project folder');
+    if (equal(before, after)) return null;
+    const {targets: sourceTargets, ...sourceOther} = source;
+    const {targets: beforeTargets, ...beforeOther} = before;
+    const {targets: afterTargets, ...afterOther} = after;
+    const originals = new Map(sourceTargets.map(target => [targetKey(target), target]));
+    const previous = new Map(beforeTargets.map(target => [targetKey(target), target]));
+    const targets = afterTargets.map(target => {
+        const key = targetKey(target);
+        const original = originals.get(key);
+        if (!original) return unsupported('The original target could not be identified');
+        return applyChanges(original, previous.get(key)!, target) as Target;
+    });
+    // The folder keeps its own target order unless the Editor reordered the sprites.
+    const order = equal(beforeKeys, afterKeys) ? sourceTargets.map(targetKey) : afterKeys;
+    const byKey = new Map(targets.map(target => [targetKey(target), target]));
+    const other = applyChanges(sourceOther, beforeOther, afterOther) as JsonObject;
+    // Keep the folder's key order, with the targets where they were.
+    const result: JsonObject = {};
+    for (const key of Object.keys(source)) {
+        if (key === 'targets') result.targets = order.map(key => byKey.get(key)!);
+        else if (Object.hasOwn(other, key)) result[key] = other[key];
+    }
+    for (const key of Object.keys(other)) if (!Object.hasOwn(result, key)) result[key] = other[key];
+    return result as Project;
 }

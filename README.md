@@ -10,7 +10,7 @@ This package opens and saves existing sb3-toolchain v1 project folders in TurboW
 - `renderProjectFolderMenu(createElement, props)` supplies the existing open and save commands to the host's file menu.
 - The mounted session's `openDirectory(handle, confirmReplace)` accepts a directory handle already selected by the host. It uses the same project validation and unsaved-edit confirmation as the file menu. Save still targets the opened folder.
 
-The host supplies the VM, menu components, and project state callbacks. The browser must support the File System Access picker for the built-in open command. This prototype supports standard block edits in existing projects. See [Editor issue #305](https://github.com/kubohiroya/turbowarp-plus-editor/issues/305) and [issue #308](https://github.com/kubohiroya/turbowarp-plus-editor/issues/308).
+The host supplies the VM, menu components, and project state callbacks. The browser must support the File System Access picker for the built-in open command. Save writes the project file only: block, variable, list, sprite property, monitor and built-in extension edits are saved, including state that changes while the project runs. Adding, removing or renaming sprites, and adding or removing costumes and sounds, are not saved yet. Projects with custom extensions, embedded extensions or fonts cannot be opened. See [Editor issue #305](https://github.com/kubohiroya/turbowarp-plus-editor/issues/305) and [issue #308](https://github.com/kubohiroya/turbowarp-plus-editor/issues/308).
 
 ## External changes
 
