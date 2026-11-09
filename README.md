@@ -12,6 +12,20 @@ This package opens and saves existing sb3-toolchain v1 project folders in TurboW
 
 The host supplies the VM, menu components, and project state callbacks. The browser must support the File System Access picker for the built-in open command. This prototype supports standard block edits in existing projects. See [Editor issue #305](https://github.com/kubohiroya/turbowarp-plus-editor/issues/305) and [issue #308](https://github.com/kubohiroya/turbowarp-plus-editor/issues/308).
 
+## External changes
+
+When the host passes `host.blockReload`, the package checks the open folder every two seconds while the page is visible, when the window regains focus, and on `FileSystemObserver` notifications where the browser supports them. A notice appears when the folder changed outside the Editor.
+
+| Editor state | Behavior |
+| --- | --- |
+| No unsaved edits, project stopped | Changes to values and positions of existing blocks are applied in place once the file has stayed the same across two checks. |
+| Project running | The change is held. Value and position changes apply when the project stops. |
+| Unsaved edits | The edits are kept. **Discard Edits and Reload…** asks before replacing them with the folder contents. |
+| Other changes to the project JSON, assets, the manifest or extensions | **Reload Whole Project** reads the folder again with the same checks as opening it. This is never automatic. |
+| Incomplete write, such as truncated JSON | The notice waits and the folder is checked again shortly. |
+
+Pass `autoReload: false` to `mountProjectFolder` to keep every reload behind the button. Checks compare file size and modification time before reading contents, so an overwrite that keeps both unchanged is not detected. Saving still compares the bytes on disk and refuses to overwrite a folder that changed.
+
 ## Development
 
 Use Node.js 26, then run `npm ci` and `npm test`. Vite builds the JavaScript library, and TypeScript emits the declarations. `npm pack` creates a tarball for host integration checks.

@@ -14,9 +14,12 @@ const messages = {
         unsupported: 'This project or edit is outside the folder prototype scope.',
         failed: 'Could not access the project folder.',
         external: 'External changes detected.', reload: 'Reload from Disk', reloaded: 'Changes loaded from disk.',
-        dirty: 'Save or set aside your unsaved edits before reloading.',
-        running: 'Stop the project before reloading.', busy: 'Please wait for the current operation.',
-        blocked: 'These changes cannot be applied as a partial reload.'
+        reloadAll: 'Reload Whole Project', discard: 'Discard Edits and Reload…',
+        discardConfirm: 'Discard your unsaved edits and load the project from the folder?',
+        dirty: 'You have unsaved edits.', running: 'Stop the project before reloading.',
+        runningAuto: 'The changes load when the project stops.', busy: 'Please wait for the current operation.',
+        waiting: 'Waiting for the external write to finish.',
+        full: 'These changes need the whole project to be reloaded.'
     },
     ja: {
         open: 'プロジェクトフォルダを開く…', save: 'プロジェクトフォルダに保存',
@@ -26,8 +29,12 @@ const messages = {
         unsupported: 'この作品または編集はフォルダ編集の試作対象外です。',
         failed: 'プロジェクトフォルダにアクセスできませんでした。',
         external: '外部変更あり', reload: 'ディスクから再読み込み', reloaded: 'ディスクの変更を読み込みました。',
+        reloadAll: '作品全体を再読み込み', discard: '編集を破棄して再読み込み…',
+        discardConfirm: '未保存の編集を破棄して、フォルダの作品を読み込みますか？',
         dirty: '未保存の編集があります。', running: '作品を停止してから再読み込みできます。',
-        busy: '処理が終わるまでお待ちください。', blocked: 'この変更は部分的に反映できません。'
+        runningAuto: '作品の停止後に反映します。', busy: '処理が終わるまでお待ちください。',
+        waiting: '外部の書き込みが終わるのを待っています。',
+        full: 'この変更は作品全体の再読み込みが必要です。'
     }
 };
 
@@ -42,8 +49,19 @@ interface MenuProps {
 type MenuEntry = {session: ReturnType<typeof createFolderSession>; open(locale: string): void; save(locale: string): void};
 const menus = new WeakMap<FolderVM, MenuEntry>();
 
-export function mountProjectFolder({vm, document, host, locale = 'en'}: {vm: FolderVM; document: Document; host: FolderHost; locale?: string}) {
-    const view = document.defaultView as PickerWindow;
+type ObserverWindow = PickerWindow & {FileSystemObserver?: new (callback: () => void) => {
+    observe(handle: FileSystemDirectoryHandle, options: {recursive: boolean}): Promise<void>;
+    disconnect(): void;
+}};
+
+/**
+ * `autoReload` (default true) applies value and position changes without a click when the Editor has no unsaved
+ * edits and the project is stopped. Other changes always wait for the reload command.
+ */
+export function mountProjectFolder({vm, document, host, locale = 'en', autoReload = true}: {
+    vm: FolderVM; document: Document; host: FolderHost; locale?: string; autoReload?: boolean;
+}) {
+    const view = document.defaultView as ObserverWindow;
     const pickDirectory = view?.showDirectoryPicker;
     if (!pickDirectory || !vm.runtime?.storage) return null;
     const session = createFolderSession(vm, host);
@@ -90,20 +108,64 @@ export function mountProjectFolder({vm, document, host, locale = 'en'}: {vm: Fol
         button.textContent = message.reload;
         notice.append(text, button);
         document.body.append(notice);
+        let settle: number | undefined;
+        let autoTried: string | null = null;
+        let observed: FileSystemDirectoryHandle | null = null;
+        let observer: InstanceType<NonNullable<ObserverWindow['FileSystemObserver']>> | null = null;
+        const apply = (run: () => Promise<boolean | string>) => {
+            const done = run();
+            renderReload();
+            void done.then(result => {if (result === true || result === 'opened') report(message.reloaded);}, error => fail(locale, error))
+                .finally(renderReload);
+        };
         renderReload = () => {
             const state = session.reloadState;
+            const kind = session.reloadKind;
+            if (autoReload && session.canAutoReload && session.pendingVersion !== autoTried) {
+                autoTried = session.pendingVersion;
+                apply(() => session.reload());
+                return;
+            }
             notice.hidden = !state;
-            button.disabled = state !== 'ready';
-            const label = !state || state === 'ready' ? message.external : `${message.external} ${message[state]}`;
+            button.hidden = !kind;
+            button.disabled = !['ready', 'full', 'dirty'].includes(state ?? '');
+            const action = state === 'dirty' ? message.discard : kind === 'full' ? message.reloadAll : message.reload;
+            if (button.textContent !== action) button.textContent = action;
+            const detail = !state || state === 'ready' ? '' :
+                state === 'running' && kind === 'partial' && autoReload ? message.runningAuto : message[state];
+            const label = detail ? `${message.external} ${detail}` : message.external;
             if (text.textContent !== label) text.textContent = label;
+            const directory = session.directory;
+            if (observer && observed !== directory) {
+                observer.disconnect();
+                observed = directory;
+                if (directory) observer.observe(directory, {recursive: true}).catch(() => {});
+            }
         };
         const refresh = () => {
-            if (document.visibilityState === 'visible') void session.refresh().then(renderReload, error => fail(locale, error));
+            if (document.visibilityState !== 'visible') return;
+            void session.refresh().then(() => {
+                renderReload();
+                // Look again soon after a new or incomplete change instead of waiting for the next interval.
+                if (session.settling) schedule(500);
+            }, error => fail(locale, error));
         };
+        const schedule = (delay: number) => {
+            view.clearTimeout(settle);
+            settle = view.setTimeout(refresh, delay);
+        };
+        if (view.FileSystemObserver) {
+            try {
+                observer = new view.FileSystemObserver(() => schedule(300));
+            } catch {
+                observer = null;
+            }
+        }
         button.addEventListener('click', () => {
-            const reload = session.reload();
-            renderReload();
-            void reload.then(applied => {if (applied) report(message.reloaded);}, error => fail(locale, error)).finally(renderReload);
+            const state = session.reloadState;
+            if (state === 'ready') apply(() => session.reload());
+            else if (state === 'full') apply(() => session.reloadAll(() => true));
+            else if (state === 'dirty') apply(() => session.reloadAll(() => view.confirm(message.discardConfirm)));
         });
         const unsubscribe = host.blockReload.subscribe(renderReload);
         const interval = view.setInterval(refresh, 2000);
@@ -112,6 +174,8 @@ export function mountProjectFolder({vm, document, host, locale = 'en'}: {vm: Fol
         stopWatching = () => {
             unsubscribe();
             view.clearInterval(interval);
+            view.clearTimeout(settle);
+            observer?.disconnect();
             view.removeEventListener('focus', refresh);
             document.removeEventListener('visibilitychange', refresh);
             notice.remove();
@@ -142,6 +206,16 @@ export function mountProjectFolder({vm, document, host, locale = 'en'}: {vm: Fol
             view.clearTimeout(timer);
             status.remove();
         }
+    };
+}
+
+export function projectFolderActions(vm: FolderVM, locale = 'en') {
+    const entry = menus.get(vm);
+    if (!entry) return undefined;
+    return {
+        open: () => entry.open(locale),
+        save: entry.session.canSave ? () => entry.save(locale) : undefined,
+        detach: () => entry.session.detach()
     };
 }
 
