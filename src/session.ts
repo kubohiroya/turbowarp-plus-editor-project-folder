@@ -2,6 +2,8 @@ import {assetKey, assertFolderUnchanged, FolderError, parseProject, projectChang
 import type {Asset, FolderSource, FolderUpdate, Project, Storage} from './source.js';
 import {applyBlockReload, planBlockReload} from './block-reload.js';
 import type {ReloadTarget} from './block-reload.js';
+import {applyScriptReload, planScriptReload} from './script-reload.js';
+import type {DeserializeBlocks, ScriptReloadTarget} from './script-reload.js';
 
 export interface FolderVM {
     runtime: {
@@ -44,15 +46,22 @@ export interface FolderHost {
         isRunning(): boolean;
         subscribe(listener: () => void): () => void;
         onApplied(targets: readonly ReloadTarget[]): void;
+        /**
+         * The VM's sb3 `deserializeBlocks`. With it, changes that add, remove or reconnect blocks replace the
+         * changed scripts in place; without it they need the whole project reloaded.
+         */
+        deserializeBlocks?: DeserializeBlocks;
     };
 }
 
 // `stable` turns true once two scans see the same file version, so consecutive writes settle before auto-apply.
-type PendingUpdate = {update: FolderUpdate; edits: ReturnType<typeof planBlockReload> | null; stable: boolean};
+type Edits = {kind: 'values'; changes: ReturnType<typeof planBlockReload>} |
+    {kind: 'scripts'; changes: ReturnType<typeof planScriptReload>};
+type PendingUpdate = {update: FolderUpdate; edits: Edits | null; stable: boolean};
 type Pending = PendingUpdate | 'structure' | 'waiting';
 type Session = {source: FolderSource; baseline: Project; stage: object; pending: Pending | null};
 /**
- * `ready`: values and positions can be applied in place. `full`: the change needs the whole project reloaded.
+ * `ready`: the change can be applied in place: values and positions, or with `deserializeBlocks`, whole scripts. `full`: the change needs the whole project reloaded.
  * `waiting`: an external write looks incomplete and is checked again. `dirty`, `running` and `busy` hold the change.
  */
 export type ReloadState = 'ready' | 'full' | 'waiting' | 'dirty' | 'running' | 'busy' | null;
@@ -119,17 +128,27 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
             busy = false;
         }
     };
+    // Value and position edits keep every VM block. Other script changes replace only the changed scripts.
+    const planEdits = (before: Project, after: Project): Edits | null => {
+        try {
+            return {kind: 'values', changes: planBlockReload(before, after)};
+        } catch (error) {
+            if (!(error instanceof FolderError)) throw error;
+        }
+        if (!host.blockReload?.deserializeBlocks) return null;
+        try {
+            return {kind: 'scripts', changes: planScriptReload(before, after)};
+        } catch (error) {
+            if (!(error instanceof FolderError)) throw error;
+            return null;
+        }
+    };
     const readUpdate = async (session: Session): Promise<Session['pending']> => {
         const previous = typeof session.pending === 'object' ? session.pending : null;
         const update = await readFolderUpdate(session.source, previous?.update ?? null);
         if (!update || typeof update === 'string') return update;
         if (previous?.update === update) return {...previous, stable: true};
-        try {
-            return {update, edits: planBlockReload(session.source.project, update.project), stable: false};
-        } catch (error) {
-            if (!(error instanceof FolderError)) throw error;
-            return {update, edits: null, stable: false};
-        }
+        return {update, edits: planEdits(session.source.project, update.project), stable: false};
     };
     const reloadKind = (): ReloadKind => {
         const pending = current?.pending;
@@ -193,9 +212,13 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
                 }
                 let targets: readonly ReloadTarget[];
                 try {
-                    targets = applyBlockReload(vm.runtime.targets ?? [], pending.edits);
+                    const {edits} = pending;
+                    targets = edits.kind === 'values' ? applyBlockReload(vm.runtime.targets ?? [], edits.changes) :
+                        applyScriptReload((vm.runtime.targets ?? []) as readonly ScriptReloadTarget[], edits.changes,
+                            host.blockReload.deserializeBlocks!);
                 } catch (error) {
-                    if (error instanceof FolderError) session.pending = {...pending, edits: null};
+                    // After a refused or failed in-place change, offer the whole reload instead of retrying it.
+                    session.pending = {...pending, edits: null};
                     throw error;
                 }
                 session.baseline = snapshot();

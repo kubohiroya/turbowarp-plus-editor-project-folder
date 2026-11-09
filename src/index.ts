@@ -4,6 +4,7 @@ import type {FolderHost, FolderVM, PickerWindow} from './session.js';
 
 export type {FolderHost, FolderVM, OpenResult} from './session.js';
 export type {ReloadTarget} from './block-reload.js';
+export type {DeserializeBlocks} from './script-reload.js';
 
 const messages = {
     en: {

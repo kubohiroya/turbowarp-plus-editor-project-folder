@@ -18,13 +18,13 @@ When the host passes `host.blockReload`, the package checks the open folder ever
 
 | Editor state | Behavior |
 | --- | --- |
-| No unsaved edits, project stopped | Changes to values and positions of existing blocks are applied in place once the file has stayed the same across two checks. |
+| No unsaved edits, project stopped | Once the file has stayed the same across two checks, changes to the scripts of existing sprites and the stage are applied in place. Value and position changes keep every block. Added, removed or reconnected blocks replace only the scripts they belong to, when the host passes `blockReload.deserializeBlocks`. |
 | Project running | The change is held. Value and position changes apply when the project stops. |
 | Unsaved edits | The edits are kept. **Discard Edits and Reload…** asks before replacing them with the folder contents. |
-| Other changes to the project JSON, assets, the manifest or extensions | **Reload Whole Project** reads the folder again with the same checks as opening it. This is never automatic. |
+| Other changes: targets, variables, comments, blocks that need a variable or an extension the project lacks, assets, the manifest or extensions | **Reload Whole Project** reads the folder again with the same checks as opening it. This is never automatic. |
 | Incomplete write, such as truncated JSON | The notice waits and the folder is checked again shortly. |
 
-Pass `autoReload: false` to `mountProjectFolder` to keep every reload behind the button. Checks compare file size and modification time before reading contents, so an overwrite that keeps both unchanged is not detected. Saving still compares the bytes on disk and refuses to overwrite a folder that changed.
+Script replacements are checked against the VM before any change, and every target is restored if the VM fails part way; the change then waits for **Reload Whole Project**. Pass `autoReload: false` to `mountProjectFolder` to keep every reload behind the button. Checks compare file size and modification time before reading contents, so an overwrite that keeps both unchanged is not detected. Saving still compares the bytes on disk and refuses to overwrite a folder that changed.
 
 ## Development
 
