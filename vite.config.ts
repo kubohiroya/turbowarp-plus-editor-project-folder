@@ -4,6 +4,7 @@ export default defineConfig({
     build: {
         // The pinned Scratch GUI still parses the library with Webpack 4.
         target: 'es2017',
+        license: {fileName: 'THIRD_PARTY_NOTICES.md'},
         lib: {entry: 'src/index.ts', formats: ['es'], fileName: () => 'index.js'}
     }
 });
