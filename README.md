@@ -28,7 +28,7 @@ Script replacements are checked against the VM before any change, and every targ
 
 ## Development
 
-Use Node.js 26, then run `npm ci` and `npm test`. Vite builds the JavaScript library, and TypeScript emits the declarations. `npm pack` creates a tarball for host integration checks.
+Use Node.js 26, then run `npm ci` and `npm test`. Vite builds the JavaScript library, and TypeScript emits the declarations. `npm pack` creates a tarball for host integration checks. `npm run test:browser` runs the folder's external changes against a real VM and workspace in Chromium on the minimal editor runtime (`@kubohiroya/turbowarp-plus-editor-test-runtime`), with the Editor's pinned VM and Scratch Blocks and without building the Editor.
 
 The Editor's headless integration test uses an actual disk directory and substitutes the picker interaction. To verify the native picker separately, open a disposable sb3-toolchain v1 project with **File → Open Project Folder…**, accept read/write access, edit a standard block, and select **File → Save to Project Folder**. Check that `project.source.json` changed in the chosen directory and reopen the same folder to confirm the edit.
 
