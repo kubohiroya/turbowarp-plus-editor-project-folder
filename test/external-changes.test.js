@@ -291,8 +291,8 @@ test('notes edits the folder cannot save and still shows the folder changes', as
     t.after(() => editor.mounted.dispose());
     await editor.open();
     const toJSON = editor.vm.toJSON;
-    // A project-level edit, such as a renamed project property, is outside what Save can write.
-    editor.vm.toJSON = (...args) => JSON.stringify({...JSON.parse(toJSON(...args)), meta: {edited: true}});
+    // A custom extension added in the Editor is outside what Save can write.
+    editor.vm.toJSON = (...args) => JSON.stringify({...JSON.parse(toJSON(...args)), extensionURLs: {custom: 'https://example.invalid/custom.js'}});
     editor.state.dirty = true;
     editor.disk.writeProject(projectAt({x: 5, y: 5}));
     await editor.scan();
