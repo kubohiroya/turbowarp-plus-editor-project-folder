@@ -71,20 +71,36 @@ test('keeps the folder target order unless the sprites were reordered', () => {
     assert.deepEqual(projectChanges(source, before, reordered).targets.map(target => target.name), ['Stage', 'Dog', 'Cat']);
 });
 
-test('refuses edits that need other files than the project file', () => {
+test('matches sprites by runtime id: a rename keeps the folder entry, and sprites can be added and removed', () => {
     const before = editorProject();
+    const ids = {before: ['s', 'c']};
     const renamed = clone(before);
     renamed.targets[1].name = 'Kitten';
-    assert.throws(() => projectChanges(folderProject(), before, renamed), scope);
+    const saved = plain(projectChanges(folderProject(), before, renamed, {...ids, after: ['s', 'c']}));
+    assert.deepEqual(saved.targets.map(target => [target.name, target.folderOnly]), [['Stage', 'Stage'], ['Kitten', 'Cat']]);
     const added = clone(before);
-    added.targets.push({...clone(before.targets[1]), name: 'Dog'});
-    assert.throws(() => projectChanges(folderProject(), before, added), scope);
+    added.targets.push({...clone(before.targets[1]), name: 'Dog', costumes: [costume('c'.repeat(32), 'dog')]});
+    const withDog = plain(projectChanges(folderProject(), before, added, {...ids, after: ['s', 'c', 'd']}));
+    assert.deepEqual(withDog.targets.map(target => target.name), ['Stage', 'Cat', 'Dog']);
+    assert.equal(withDog.targets[2].folderOnly, undefined);
+    const removed = clone(before);
+    removed.targets.pop();
+    assert.deepEqual(plain(projectChanges(folderProject(), before, removed, {...ids, after: ['s']})).targets.map(target => target.name), ['Stage']);
+    // Without ids, a renamed sprite is a removed sprite and a new one.
+    assert.equal(plain(projectChanges(folderProject(), before, renamed)).targets[1].folderOnly, undefined);
+});
+
+test('accepts new and removed costumes, and refuses unsupported assets and custom extensions', () => {
+    const before = editorProject();
     const newCostume = clone(before);
     newCostume.targets[1].costumes.push(costume('c'.repeat(32), 'cat2'));
-    assert.throws(() => projectChanges(folderProject(), before, newCostume), scope);
+    assert.equal(plain(projectChanges(folderProject(), before, newCostume)).targets[1].costumes.length, 2);
     const removedCostume = clone(before);
     removedCostume.targets[0].costumes = [];
-    assert.throws(() => projectChanges(folderProject(), before, removedCostume), scope);
+    assert.deepEqual(plain(projectChanges(folderProject(), before, removedCostume)).targets[0].costumes, []);
+    const unsupportedFormat = clone(before);
+    unsupportedFormat.targets[1].sounds.push({name: 'clip', assetId: 'd'.repeat(32), dataFormat: 'ogg', md5ext: `${'d'.repeat(32)}.ogg`});
+    assert.throws(() => projectChanges(folderProject(), before, unsupportedFormat), scope);
     const custom = clone(before);
     custom.extensionURLs = {custom: 'https://example.invalid/custom.js'};
     assert.throws(() => projectChanges(folderProject(), before, custom), scope);
