@@ -2,7 +2,7 @@ import {FolderError} from './source.js';
 import {createFolderSession} from './session.js';
 import type {FolderHost, FolderVM, PickerWindow} from './session.js';
 
-export type {FolderHost, FolderVM, OpenResult} from './session.js';
+export type {Comparison, ComparisonRequest, ComparisonSection, FolderHost, FolderVM, OpenResult} from './session.js';
 export type {ReloadTarget} from './block-reload.js';
 export type {DeserializeBlocks} from './script-reload.js';
 
@@ -17,6 +17,11 @@ const messages = {
         external: 'External changes detected.', reload: 'Reload from Disk', reloaded: 'Changes loaded from disk.',
         reloadAll: 'Reload Whole Project', discard: 'Discard Edits and Reload…',
         discardConfirm: 'Discard your unsaved edits and load the project from the folder?',
+        compare: 'Compare and Choose…', compareTitle: 'External changes and your unsaved edits',
+        compareDescription: 'The project folder changed while the Editor has unsaved edits. Loading from the folder discards your edits.',
+        compareUnsaved: 'Some of your edits are outside what the project folder can save, so they are not shown here.',
+        yourEdits: 'Your unsaved edits', diskChanges: 'Changes in the folder',
+        keep: 'Keep My Edits', discardLoad: 'Discard Edits and Load from Folder', close: 'Close',
         dirty: 'You have unsaved edits.', running: 'Stop the project before reloading.',
         runningAuto: 'The changes load when the project stops.', busy: 'Please wait for the current operation.',
         waiting: 'Waiting for the external write to finish.',
@@ -32,6 +37,11 @@ const messages = {
         external: '外部変更あり', reload: 'ディスクから再読み込み', reloaded: 'ディスクの変更を読み込みました。',
         reloadAll: '作品全体を再読み込み', discard: '編集を破棄して再読み込み…',
         discardConfirm: '未保存の編集を破棄して、フォルダの作品を読み込みますか？',
+        compare: '比較して選ぶ…', compareTitle: '外部の変更と未保存の編集',
+        compareDescription: 'Editor に未保存の編集がある間に、プロジェクトフォルダが変更されました。フォルダから読み込むと、未保存の編集は失われます。',
+        compareUnsaved: '未保存の編集の一部はプロジェクトフォルダに保存できない種類のため、ここには表示していません。',
+        yourEdits: 'あなたの未保存の編集', diskChanges: 'フォルダでの変更',
+        keep: '編集を残す', discardLoad: '編集を破棄してフォルダから読み込む', close: '閉じる',
         dirty: '未保存の編集があります。', running: '作品を停止してから再読み込みできます。',
         runningAuto: '作品の停止後に反映します。', busy: '処理が終わるまでお待ちください。',
         waiting: '外部の書き込みが終わるのを待っています。',
@@ -109,6 +119,31 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
         button.textContent = message.reload;
         notice.append(text, button);
         document.body.append(notice);
+        const compareChanges = host.blockReload.compareChanges?.bind(host.blockReload);
+        let comparing = false;
+        // Lets the user see their unsaved edits next to the folder's changes before choosing to replace them.
+        const compare = async (show: NonNullable<typeof compareChanges>) => {
+            if (comparing) return;
+            comparing = true;
+            try {
+                const texts = await session.comparison();
+                if (!texts) return;
+                const sections = [{title: message.diskChanges, before: texts.base, after: texts.disk}];
+                if (texts.editor !== null) sections.unshift({title: message.yourEdits, before: texts.base, after: texts.editor});
+                const choice = await show({
+                    title: message.compareTitle, description: message.compareDescription,
+                    notes: texts.editor === null ? [message.compareUnsaved] : [], sections,
+                    actions: [{id: 'keep', label: message.keep}, {id: 'discard', label: message.discardLoad}],
+                    closeLabel: message.close
+                });
+                if (choice === 'discard' && session.reloadState === 'dirty') apply(() => session.reloadAll(() => true));
+            } catch (error) {
+                fail(locale, error);
+            } finally {
+                comparing = false;
+                renderReload();
+            }
+        };
         let settle: number | undefined;
         let autoTried: string | null = null;
         let observed: FileSystemDirectoryHandle | null = null;
@@ -130,7 +165,8 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
             notice.hidden = !state;
             button.hidden = !kind;
             button.disabled = !['ready', 'full', 'dirty'].includes(state ?? '');
-            const action = state === 'dirty' ? message.discard : kind === 'full' ? message.reloadAll : message.reload;
+            const action = state === 'dirty' ? (compareChanges ? message.compare : message.discard) :
+                kind === 'full' ? message.reloadAll : message.reload;
             if (button.textContent !== action) button.textContent = action;
             const detail = !state || state === 'ready' ? '' :
                 state === 'running' && kind === 'partial' && autoReload ? message.runningAuto : message[state];
@@ -166,6 +202,7 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
             const state = session.reloadState;
             if (state === 'ready') apply(() => session.reload());
             else if (state === 'full') apply(() => session.reloadAll(() => true));
+            else if (state === 'dirty' && compareChanges) void compare(compareChanges);
             else if (state === 'dirty') apply(() => session.reloadAll(() => view.confirm(message.discardConfirm)));
         });
         const unsubscribe = host.blockReload.subscribe(renderReload);

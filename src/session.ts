@@ -51,8 +51,22 @@ export interface FolderHost {
          * changed scripts in place; without it they need the whole project reloaded.
          */
         deserializeBlocks?: DeserializeBlocks;
+        /**
+         * Shows the comparisons in `request` and resolves with the chosen action's id, or `null` when closed.
+         * With it, unsaved edits are compared with the folder before the user chooses to replace them.
+         */
+        compareChanges?(request: ComparisonRequest): Promise<string | null>;
     };
 }
+
+/** A titled comparison of two project.source.json texts; `null` stands for a version that cannot be shown. */
+export type ComparisonSection = {title: string; before: string | null; after: string | null};
+export type ComparisonRequest = {
+    title: string; description: string; notes: string[]; sections: ComparisonSection[];
+    actions: {id: string; label: string}[]; closeLabel: string;
+};
+/** The last version loaded or saved, the Editor's edits as Save would write them, and the folder now. */
+export type Comparison = {base: string; editor: string | null; disk: string | null};
 
 // `stable` turns true once two scans see the same file version, so consecutive writes settle before auto-apply.
 type Edits = {kind: 'values'; changes: ReturnType<typeof planBlockReload>} |
@@ -187,6 +201,32 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
             return typeof pending === 'object' && pending !== null ? pending.update.version : null;
         },
         get directory() {return current?.source.directory ?? null;},
+        /**
+         * Reads what to compare before unsaved edits are replaced. `editor` is `null` when the edits cannot be
+         * written to the folder, and `disk` when the folder's project file cannot be read.
+         */
+        async comparison(): Promise<Comparison | null> {
+            const session = current;
+            if (!session) return null;
+            const decoder = new TextDecoder();
+            const base = decoder.decode(session.source.files.get(projectFile));
+            let editor: string | null;
+            try {
+                const result = projectChanges(session.source.project, session.baseline, snapshot());
+                editor = result ? `${JSON.stringify(result, null, 2)}\n` : base;
+            } catch (error) {
+                if (!(error instanceof FolderError)) throw error;
+                editor = null;
+            }
+            let disk: string | null;
+            try {
+                const file = await (await session.source.directory.getFileHandle(projectFile)).getFile();
+                disk = decoder.decode(new Uint8Array(await file.arrayBuffer()));
+            } catch {
+                disk = null;
+            }
+            return current === session ? {base, editor, disk} : null;
+        },
         refresh(): Promise<void> {
             if (disposed || busy || !current || !host.blockReload) return Promise.resolve();
             if (scanning) return scanning;

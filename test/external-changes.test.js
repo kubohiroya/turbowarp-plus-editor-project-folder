@@ -43,7 +43,7 @@ async function settle() {
     for (let index = 0; index < 30; index++) await new Promise(resolve => setImmediate(resolve));
 }
 
-function setup({initial = projectAt({x: 0, y: 0}), autoReload} = {}) {
+function setup({initial = projectAt({x: 0, y: 0}), autoReload, compareChanges} = {}) {
     const disk = folder(initial);
     const state = {dirty: false, running: false, applied: 0, loads: [], confirms: [], confirmAnswer: true};
     const listeners = new Set();
@@ -102,7 +102,8 @@ function setup({initial = projectAt({x: 0, y: 0}), autoReload} = {}) {
         blockReload: {
             isRunning: () => state.running,
             subscribe(listener) {listeners.add(listener); return () => listeners.delete(listener);},
-            onApplied() {state.applied++;}
+            onApplied() {state.applied++;},
+            ...(compareChanges ? {compareChanges} : {})
         }
     };
     const mounted = mountProjectFolder({vm, document, host, autoReload});
@@ -244,4 +245,61 @@ test('treats a changed manifest as a structural change', async t => {
     editor.disk.write('embedded-extensions.json', stringify({formatVersion: 1, extensions: [], note: 'changed'}));
     await editor.scan();
     assert.equal(editor.button.textContent, 'Reload Whole Project');
+});
+
+test('compares unsaved edits with the folder and keeps them unless the user discards them', async t => {
+    const requests = [];
+    let answer = 'keep';
+    const editor = setup({compareChanges: async request => {requests.push(request); return answer;}});
+    t.after(() => editor.mounted.dispose());
+    await editor.open();
+    editor.vm.runtime.targets[0].blocks.moveBlock({id: 'flag', newCoordinate: {x: 11, y: 12}});
+    editor.state.dirty = true;
+    const external = projectAt({x: 70, y: 80});
+    editor.disk.writeProject(external);
+    await editor.scan();
+    await editor.runTimers();
+    assert.equal(editor.button.textContent, 'Compare and Choose…');
+    editor.button.click();
+    await settle();
+    assert.equal(requests.length, 1);
+    const [request] = requests;
+    assert.equal(request.title, 'External changes and your unsaved edits');
+    assert.deepEqual(request.actions.map(action => action.id), ['keep', 'discard']);
+    assert.deepEqual(request.sections.map(section => section.title), ['Your unsaved edits', 'Changes in the folder']);
+    const [edits, folder] = request.sections;
+    assert.equal(edits.before, folder.before, 'both start from the version last loaded');
+    assert.deepEqual(JSON.parse(edits.before).targets[0].blocks.flag, flagBlock({x: 0, y: 0}));
+    assert.deepEqual(JSON.parse(edits.after).targets[0].blocks.flag, flagBlock({x: 11, y: 12}), 'edits as Save would write them');
+    assert.deepEqual(JSON.parse(folder.after), external);
+    assert.deepEqual(request.notes, []);
+    assert.equal(editor.state.loads.length, 1, 'keeping the edits loads nothing');
+    assert.deepEqual(editor.position(), {x: 11, y: 12});
+    assert.equal(editor.state.confirms.length, 0);
+
+    answer = 'discard';
+    editor.button.click();
+    await settle();
+    assert.deepEqual(editor.state.loads.at(-1), external);
+    assert.deepEqual(editor.position(), {x: 70, y: 80});
+    assert.equal(editor.state.confirms.length, 0, 'the comparison replaces the confirmation');
+});
+
+test('notes edits the folder cannot save and still shows the folder changes', async t => {
+    const requests = [];
+    const editor = setup({compareChanges: async request => {requests.push(request); return null;}});
+    t.after(() => editor.mounted.dispose());
+    await editor.open();
+    const toJSON = editor.vm.toJSON;
+    // A project-level edit, such as a renamed project property, is outside what Save can write.
+    editor.vm.toJSON = (...args) => JSON.stringify({...JSON.parse(toJSON(...args)), meta: {edited: true}});
+    editor.state.dirty = true;
+    editor.disk.writeProject(projectAt({x: 5, y: 5}));
+    await editor.scan();
+    await editor.runTimers();
+    editor.button.click();
+    await settle();
+    assert.deepEqual(requests[0].sections.map(section => section.title), ['Changes in the folder']);
+    assert.equal(requests[0].notes.length, 1);
+    assert.equal(editor.state.loads.length, 1, 'closing the dialog keeps the edits');
 });
