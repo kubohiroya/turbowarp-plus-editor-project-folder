@@ -7,8 +7,8 @@ export type VmBlock = {
     id: string; opcode: string; topLevel: boolean; parent?: string | null; comment?: string;
     fields: Record<string, {name?: string; value: unknown; id?: string | null; variableType?: string}>;
 };
-/** The VM's sb3 `deserializeBlocks`: turns serialized blocks into VM blocks, in place. */
-export type DeserializeBlocks = (blocks: Record<string, unknown>) => Record<string, VmBlock>;
+/** The VM's sb3 `deserializeBlocks`: turns serialized blocks into VM blocks, in place. Results are checked before use. */
+export type DeserializeBlocks = (blocks: Record<string, unknown>) => Record<string, {id: string}>;
 
 type Container = ReloadTarget['blocks'] & {
     _blocks: Record<string, VmBlock>;
@@ -131,7 +131,7 @@ export function applyScriptReload(targets: readonly ScriptReloadTarget[], edits:
             const block = container.getBlock(id);
             if (!block || !block.topLevel || !container._scripts.includes(id)) return reject('The editor and the folder differ');
         }
-        const created = Object.values(deserialize(JSON.parse(JSON.stringify(edit.blocks))));
+        const created = Object.values(deserialize(JSON.parse(JSON.stringify(edit.blocks)))) as VmBlock[];
         for (const block of created) {
             if (typeof block.id !== 'string' || typeof block.opcode !== 'string') return reject('A block could not be read');
             if (block.comment && !(target.comments && Object.hasOwn(target.comments, block.comment))) {
