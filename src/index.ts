@@ -145,6 +145,16 @@ export function mountProjectFolder({vm, document, host, locale = 'en'}: {vm: Fol
     };
 }
 
+export function projectFolderActions(vm: FolderVM, locale = 'en') {
+    const entry = menus.get(vm);
+    if (!entry) return undefined;
+    return {
+        open: () => entry.open(locale),
+        save: entry.session.canSave ? () => entry.save(locale) : undefined,
+        detach: () => entry.session.detach()
+    };
+}
+
 export function renderProjectFolderMenu(createElement: MenuElement, {
     vm, locale = 'en', MenuItem, MenuSection, onRequestClose
 }: MenuProps) {

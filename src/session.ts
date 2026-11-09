@@ -133,6 +133,7 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
     };
     const canApply = () => !host.isProjectDirty() && !host.blockReload?.isRunning();
     return {
+        detach() {current = null;},
         get canSave() {return current !== null;},
         get busy() {return busy;},
         get reloadState() {return reloadState();},
