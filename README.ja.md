@@ -33,3 +33,10 @@ Node.js 26 で `npm ci` と `npm test` を実行します。Vite で JavaScript�
 Editor のヘッドレス統合テストは実ディスク上のフォルダを使い、選択画面の操作を差し替えます。OS のフォルダ選択画面を確認するときは、使い捨ての sb3-toolchain v1 作品を **ファイル → プロジェクトフォルダを開く…** から選び、読み書きを許可します。標準ブロックを変更し、**ファイル → プロジェクトフォルダに保存** を選びます。選んだフォルダの `project.source.json` が更新されたことを確かめ、同じフォルダを開き直して編集が反映されることを確認します。
 
 初期実装は MPL-2.0 の [TurboWarp Plus Editor d14d065](https://github.com/kubohiroya/turbowarp-plus-editor/tree/d14d0659f77f37328c855ecfeeae0927d81ae81a/packages/editor-project-folder) から分離しました。
+
+## 公開
+
+npm への公開は `.github/workflows/release.yml` が行う。`main` への push で `package.json` の版が
+npm にまだ無いときだけ、テストを通したうえで公開する。すでにある版では何もしない。認証はトークン
+ではなく npm の Trusted Publisher（OIDC）で、`id-token: write` の権限を使い、provenance が自動で付く。
+npm 側の設定にはこのワークフローのファイル名をそのまま登録するため、改名するときは npm の設定も合わせる。
