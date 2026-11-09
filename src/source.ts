@@ -4,7 +4,7 @@ export type Project = JsonObject & {targets: Target[]};
 type Target = JsonObject & {isStage: boolean; name: string};
 
 export const projectFile = 'project.source.json';
-const manifestFile = 'sb3-source.json';
+export const manifestFile = 'sb3-source.json';
 const extensionsFile = 'embedded-extensions.json';
 
 export class FolderError extends Error {
@@ -61,7 +61,7 @@ type FolderFiles = {
 export type FolderSource = FolderFiles & {project: Project; projectText: string; storageAssets: Map<string, Asset>};
 
 const getFile = async (dir: FileSystemDirectoryHandle, name: string) => (await dir.getFileHandle(name)).getFile();
-const fileVersion = (file: File) => `${file.size}:${file.lastModified}`;
+export const fileVersion = (file: File) => `${file.size}:${file.lastModified}`;
 const fileBytes = async (file: File) => new Uint8Array(await file.arrayBuffer());
 const readBytes = async (dir: FileSystemDirectoryHandle, name: string) => fileBytes(await getFile(dir, name));
 const readNames = async (dir: FileSystemDirectoryHandle) => {
@@ -78,6 +78,8 @@ const sameNames = (actual: Set<string>, expected: Iterable<string>) => {
     return actual.size === expectedNames.size && [...actual].every(name => expectedNames.has(name));
 };
 
+export const assetTypeFor = (storage: Storage, kind: 'costumes' | 'sounds', format: string) => kind === 'sounds' ?
+    storage.AssetType.Sound : format === 'svg' ? storage.AssetType.ImageVector : storage.AssetType.ImageBitmap;
 export const assetKey = (type: AssetType, id: string, format: string) => `${type.name}/${id}.${format}`;
 
 export async function readFolder(directory: FileSystemDirectoryHandle, storage: Storage): Promise<FolderSource> {
@@ -235,13 +237,23 @@ const applyChanges = (source: Json | undefined, before: Json, after: Json): Json
     return result;
 };
 
-const assetNames = (project: Project) => {
-    const names = new Set<string>();
+/** The asset files a project refers to, by file name, with the kind of list that refers to each. */
+export const projectAssets = (project: Project) => {
+    const names = new Map<string, 'costumes' | 'sounds'>();
     for (const target of project.targets) {
         for (const kind of ['costumes', 'sounds'] as const) {
-            const entries = target[kind];
-            if (!Array.isArray(entries)) continue;
-            for (const entry of entries) if (isObject(entry) && typeof entry.md5ext === 'string') names.add(entry.md5ext);
+            const entries = target[kind] ?? [];
+            if (!Array.isArray(entries)) return unsupported('Invalid asset list');
+            for (const entry of entries) {
+                if (!isObject(entry) || typeof entry.assetId !== 'string' || !/^[a-f0-9]{32}$/u.test(entry.assetId) ||
+                    typeof entry.dataFormat !== 'string' || entry.md5ext !== `${entry.assetId}.${entry.dataFormat}`) {
+                    return unsupported('Invalid asset reference');
+                }
+                const supported = kind === 'sounds' ? /^(wav|mp3)$/u.test(entry.dataFormat) :
+                    /^(svg|png|bmp|jpg|jpeg|gif)$/u.test(entry.dataFormat);
+                if (!supported) return unsupported(`Unsupported asset reference: ${entry.md5ext}`);
+                names.set(entry.md5ext, kind);
+            }
         }
     }
     return names;
@@ -249,42 +261,48 @@ const assetNames = (project: Project) => {
 const customContent = (project: Project) => project.turboWarpPlus !== undefined || project.customFonts !== undefined ||
     (project.extensionURLs !== undefined && (!isObject(project.extensionURLs) || Object.keys(project.extensionURLs).length > 0));
 
+/** Runtime ids of the targets, in the order of the project's `targets`, so a renamed sprite stays the same sprite. */
+export type TargetIdentity = {before: readonly string[]; after: readonly string[]};
+
 /**
  * Applies the edits between `before` and `after` (both from the VM) to the project read from the folder, keeping the
- * fields and order the VM does not know. Saves change only the project file: the stage and sprites keep their names,
- * and the costumes and sounds keep using the asset files already in the folder. Returns `null` without edits.
+ * fields and order the VM does not know. Sprites are matched by `identity` (by name without it): a sprite with the
+ * same id keeps its folder entry under a new name, and added or removed sprites are added or removed. The asset files
+ * the result needs are the caller's to write. Returns `null` without edits.
  */
-export function projectChanges(source: Project, before: Project, after: Project): Project | null {
-    const keys = (project: Project) => project.targets.map(targetKey);
-    const beforeKeys = keys(before), afterKeys = keys(after);
-    if (beforeKeys.length !== afterKeys.length || !afterKeys.every(key => beforeKeys.includes(key))) {
-        return unsupported('Adding, removing or renaming sprites is not saved to a project folder yet');
+export function projectChanges(source: Project, before: Project, after: Project, identity?: TargetIdentity): Project | null {
+    const beforeIds = identity?.before ?? before.targets.map(targetKey);
+    const afterIds = identity?.after ?? after.targets.map(targetKey);
+    if (beforeIds.length !== before.targets.length || afterIds.length !== after.targets.length) {
+        return unsupported('The targets could not be identified');
     }
-    const used = assetNames(after), known = assetNames(before);
-    if (used.size !== known.size || [...used].some(name => !known.has(name))) {
-        return unsupported('Adding or removing costumes and sounds is not saved to a project folder yet');
-    }
+    projectAssets(after);
     if (customContent(after)) return unsupported('Custom extensions and fonts are not saved to a project folder');
-    if (equal(before, after)) return null;
+    if (equal(before, after) && equal([...beforeIds], [...afterIds])) return null;
     const {targets: sourceTargets, ...sourceOther} = source;
     const {targets: beforeTargets, ...beforeOther} = before;
     const {targets: afterTargets, ...afterOther} = after;
     const originals = new Map(sourceTargets.map(target => [targetKey(target), target]));
-    const previous = new Map(beforeTargets.map(target => [targetKey(target), target]));
-    const targets = afterTargets.map(target => {
-        const key = targetKey(target);
-        const original = originals.get(key);
+    const previous = new Map(beforeTargets.map((target, index) => [beforeIds[index], target]));
+    const targets = afterTargets.map((target, index) => {
+        const prior = previous.get(afterIds[index]);
+        if (!prior) return target;
+        const original = originals.get(targetKey(prior));
         if (!original) return unsupported('The original target could not be identified');
-        return applyChanges(original, previous.get(key)!, target) as Target;
+        return applyChanges(original, prior, target) as Target;
     });
-    // The folder keeps its own target order unless the Editor reordered the sprites.
-    const order = equal(beforeKeys, afterKeys) ? sourceTargets.map(targetKey) : afterKeys;
-    const byKey = new Map(targets.map(target => [targetKey(target), target]));
+    // The folder keeps its own target order unless the Editor added, removed or reordered sprites.
+    let ordered = targets;
+    if (equal([...beforeIds], [...afterIds])) {
+        const position = new Map(sourceTargets.map((target, index) => [targetKey(target), index]));
+        const place = (index: number) => position.get(targetKey(beforeTargets[index])) ?? index;
+        ordered = targets.map((target, index) => ({target, at: place(index)})).sort((a, b) => a.at - b.at).map(entry => entry.target);
+    }
     const other = applyChanges(sourceOther, beforeOther, afterOther) as JsonObject;
     // Keep the folder's key order, with the targets where they were.
     const result: JsonObject = {};
     for (const key of Object.keys(source)) {
-        if (key === 'targets') result.targets = order.map(key => byKey.get(key)!);
+        if (key === 'targets') result.targets = ordered;
         else if (Object.hasOwn(other, key)) result[key] = other[key];
     }
     for (const key of Object.keys(other)) if (!Object.hasOwn(result, key)) result[key] = other[key];

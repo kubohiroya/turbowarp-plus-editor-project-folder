@@ -1,5 +1,6 @@
-import {assetKey, assertFolderUnchanged, FolderError, parseProject, projectChanges, projectFile, readFolder, readFolderUpdate} from './source.js';
-import type {Asset, FolderSource, FolderUpdate, Project, Storage} from './source.js';
+import {assetKey, assetTypeFor, assertFolderUnchanged, fileVersion, FolderError, manifestFile, parseProject, projectAssets, projectChanges,
+    projectFile, readFolder, readFolderUpdate, unsupported} from './source.js';
+import type {Asset, FolderSource, FolderUpdate, JsonObject, Project, Storage} from './source.js';
 import {applyBlockReload, planBlockReload} from './block-reload.js';
 import type {ReloadTarget} from './block-reload.js';
 import {applyScriptReload, planScriptReload} from './script-reload.js';
@@ -73,7 +74,7 @@ type Edits = {kind: 'values'; changes: ReturnType<typeof planBlockReload>} |
     {kind: 'scripts'; changes: ReturnType<typeof planScriptReload>};
 type PendingUpdate = {update: FolderUpdate; edits: Edits | null; stable: boolean};
 type Pending = PendingUpdate | 'structure' | 'waiting';
-type Session = {source: FolderSource; baseline: Project; stage: object; pending: Pending | null};
+type Session = {source: FolderSource; baseline: Project; ids: string[] | undefined; stage: object; pending: Pending | null};
 /**
  * `ready`: the change can be applied in place: values and positions, or with `deserializeBlocks`, whole scripts. `full`: the change needs the whole project reloaded.
  * `waiting`: an external write looks incomplete and is checked again. `dirty`, `running` and `busy` hold the change.
@@ -84,6 +85,8 @@ export type ReloadKind = 'partial' | 'full' | null;
 export type OpenResult = 'opened' | 'cancelled';
 export type SaveResult = 'saved' | 'unchanged';
 
+type VMAsset = {assetId: string; dataFormat: string; data?: Uint8Array};
+
 export function createFolderSession(vm: FolderVM, host: FolderHost) {
     let current: Session | null = null;
     let busy = false;
@@ -91,6 +94,53 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
     let revision = 0;
     let scanning: Promise<void> | null = null;
     const snapshot = () => parseProject(vm.toJSON(undefined, {allowOptimization: false}));
+    type RuntimeTarget = {id?: string; isStage: boolean; isOriginal: boolean; getName(): string; sprite?: {
+        costumes?: readonly {asset?: VMAsset}[]; sounds?: readonly {asset?: VMAsset}[];
+    }};
+    const runtimeTargets = () => (vm.runtime.targets ?? []) as readonly RuntimeTarget[];
+    // Runtime ids in the order of the project's targets, so a renamed sprite is still the same sprite.
+    const identify = (project: Project): string[] | undefined => {
+        const ids = new Map<string, string>();
+        for (const target of runtimeTargets()) {
+            if (target.isOriginal && target.id) ids.set(target.isStage ? 'stage' : `sprite:${target.getName()}`, target.id);
+        }
+        const result = project.targets.map(target => ids.get(target.isStage ? 'stage' : `sprite:${target.name}`));
+        return result.every((id): id is string => id !== undefined) ? result : undefined;
+    };
+    const identity = (session: Session, edited: Project) => {
+        const after = identify(edited);
+        return session.ids && after ? {before: session.ids, after} : undefined;
+    };
+    // Writes a whole file and, for a file the folder already had, checks the folder before the write takes effect.
+    // A new asset file is empty until then, so it is checked by the writes that follow it instead.
+    const writeChecked = async (session: Session, handle: FileSystemFileHandle, data: Uint8Array, existing: boolean) => {
+        const options = (existing ? {mode: 'exclusive'} : {}) as FileSystemCreateWritableOptions;
+        const writable = await handle.createWritable(options);
+        try {
+            await writable.write(data as Uint8Array<ArrayBuffer>);
+            if (existing) await assertFolderUnchanged(session.source);
+            active(session);
+            await writable.close();
+        } catch (error) {
+            await writable.abort().catch(() => {});
+            throw error;
+        }
+    };
+    const rewrite = async (directory: FileSystemDirectoryHandle, name: string, data: Uint8Array) => {
+        const writable = await (await directory.getFileHandle(name)).createWritable();
+        await writable.write(data as Uint8Array<ArrayBuffer>);
+        await writable.close();
+    };
+    // The bytes of an asset the Editor holds, such as a costume added since the folder was opened.
+    const assetData = (name: string) => {
+        for (const target of runtimeTargets()) {
+            for (const entry of [...target.sprite?.costumes ?? [], ...target.sprite?.sounds ?? []]) {
+                const asset = entry.asset;
+                if (asset && `${asset.assetId}.${asset.dataFormat}` === name && asset.data) return asset.data;
+            }
+        }
+        return null;
+    };
     const changed = () => {revision++;};
     const loaded = () => {current = null;};
     vm.runtime.on('PROJECT_LOADED', loaded);
@@ -135,7 +185,8 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
             }
             if (disposed || !stage || vm.runtime.getTargetForStage() !== stage) return 'cancelled';
             host.onOpened(directory.name);
-            current = {source, stage, baseline: snapshot(), pending: null};
+            const baseline = snapshot();
+            current = {source, stage, baseline, ids: identify(baseline), pending: null};
             vm.renderer?.draw();
             return 'opened';
         } finally {
@@ -212,7 +263,8 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
             const base = decoder.decode(session.source.files.get(projectFile));
             let editor: string | null;
             try {
-                const result = projectChanges(session.source.project, session.baseline, snapshot());
+                const edited = snapshot();
+                const result = projectChanges(session.source.project, session.baseline, edited, identity(session, edited));
                 editor = result ? `${JSON.stringify(result, null, 2)}\n` : base;
             } catch (error) {
                 if (!(error instanceof FolderError)) throw error;
@@ -262,6 +314,7 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
                     throw error;
                 }
                 session.baseline = snapshot();
+                session.ids = identify(session.baseline);
                 session.source.project = pending.update.project;
                 session.source.files.set(projectFile, pending.update.bytes);
                 session.source.versions.set(projectFile, pending.update.version);
@@ -304,30 +357,86 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
             try {
                 const saveRevision = revision;
                 const edited = snapshot();
-                const result = projectChanges(session.source.project, session.baseline, edited);
+                const ids = identify(edited);
+                const result = projectChanges(session.source.project, session.baseline, edited, identity(session, edited));
                 await assertFolderUnchanged(session.source);
                 active(session);
                 if (!result) {
                     if (revision === saveRevision) host.onSaved();
                     return 'unchanged';
                 }
+                const {source} = session;
+                // New asset files first, then the manifest and the project file, then the files nothing refers to.
+                // A failure part way leaves every file the manifest and the project file refer to in the folder.
+                const needed = projectAssets(result);
+                const added = new Map<string, Uint8Array>();
+                for (const [name, kind] of needed) {
+                    if (source.bytes.has(name)) continue;
+                    const data = assetData(name);
+                    if (!data) return unsupported(`The data of ${name} is not in the Editor`);
+                    const [id, format] = name.split('.');
+                    const asset = vm.runtime.storage.createAsset(assetTypeFor(vm.runtime.storage, kind, format), format, data.slice(), null, true);
+                    if (asset.assetId !== id) return unsupported(`Asset hash mismatch: ${name}`);
+                    added.set(name, data);
+                }
+                const removed = [...source.bytes.keys()].filter(name => !needed.has(name));
+                const encoder = new TextEncoder();
+                let manifest: Uint8Array | null = null;
+                if (added.size || removed.length) {
+                    const value = JSON.parse(new TextDecoder().decode(source.files.get(manifestFile))) as JsonObject;
+                    const entries = (value.archiveEntries as string[]).filter(name => !removed.includes(name));
+                    value.archiveEntries = [...entries, ...added.keys()];
+                    manifest = encoder.encode(`${JSON.stringify(value, null, 2)}\n`);
+                }
+                const assets = await source.directory.getDirectoryHandle('assets');
+                const written: string[] = [];
+                const previousManifest = source.files.get(manifestFile)!;
+                let manifestWritten = false;
                 const text = `${JSON.stringify(result, null, 2)}\n`;
-                const file = await session.source.directory.getFileHandle(projectFile);
-                const options = {mode: 'exclusive'} as FileSystemCreateWritableOptions;
-                const writable = await file.createWritable(options);
                 try {
-                    await writable.write(text);
-                    await assertFolderUnchanged(session.source);
-                    active(session);
-                    await writable.close();
+                    for (const [name, data] of added) {
+                        const handle = await assets.getFileHandle(name, {create: true});
+                        written.push(name);
+                        await writeChecked(session, handle, data, false);
+                        source.bytes.set(name, data);
+                        source.versions.set(`assets/${name}`, fileVersion(await handle.getFile()));
+                    }
+                    if (manifest) {
+                        const handle = await source.directory.getFileHandle(manifestFile);
+                        await writeChecked(session, handle, manifest, true);
+                        manifestWritten = true;
+                        source.files.set(manifestFile, manifest);
+                        source.versions.set(manifestFile, fileVersion(await handle.getFile()));
+                    }
+                    await writeChecked(session, await source.directory.getFileHandle(projectFile), encoder.encode(text), true);
                 } catch (error) {
-                    await writable.abort().catch(() => {});
+                    // Put the folder back as it was, as far as it can be. The checks above keep other tools' files.
+                    if (manifestWritten) {
+                        await rewrite(source.directory, manifestFile, previousManifest).catch(() => {});
+                        source.files.set(manifestFile, previousManifest);
+                        source.versions.delete(manifestFile);
+                    }
+                    for (const name of written) {
+                        await assets.removeEntry(name).catch(() => {});
+                        source.bytes.delete(name);
+                        source.versions.delete(`assets/${name}`);
+                    }
                     throw error;
                 }
-                session.source.project = result;
-                session.source.files.set(projectFile, new TextEncoder().encode(text));
-                session.source.versions.delete(projectFile);
+                source.project = result;
+                source.files.set(projectFile, encoder.encode(text));
+                source.versions.delete(projectFile);
+                for (const name of removed) {
+                    try {
+                        await assets.removeEntry(name);
+                        source.bytes.delete(name);
+                        source.versions.delete(`assets/${name}`);
+                    } catch {
+                        // The file stays; nothing refers to it, and the next save tries again.
+                    }
+                }
                 session.baseline = edited;
+                session.ids = ids;
                 session.pending = null;
                 if (current === session && revision === saveRevision) host.onSaved();
                 return 'saved';
