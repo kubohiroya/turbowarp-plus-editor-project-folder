@@ -20,7 +20,7 @@ When the host passes `host.blockReload`, the package checks the open folder ever
 | --- | --- |
 | No unsaved edits, project stopped | Once the file has stayed the same across two checks, changes to the scripts of existing sprites and the stage are applied in place. Value and position changes keep every block. Added, removed or reconnected blocks replace only the scripts they belong to, when the host passes `blockReload.deserializeBlocks`. |
 | Project running | The change is held. Value and position changes apply when the project stops. |
-| Unsaved edits | The edits are kept. **Discard Edits and Reload…** asks before replacing them with the folder contents. |
+| Unsaved edits | The edits are kept. When the host passes `blockReload.compareChanges`, **Compare and Choose…** shows your unsaved edits next to the folder's changes, and the edits are replaced only if you choose **Discard Edits and Load from Folder**. Without it, **Discard Edits and Reload…** asks before replacing them. |
 | Other changes: targets, variables, comments, blocks that need a variable or an extension the project lacks, assets, the manifest or extensions | **Reload Whole Project** reads the folder again with the same checks as opening it. This is never automatic. |
 | Incomplete write, such as truncated JSON | The notice waits and the folder is checked again shortly. |
 
