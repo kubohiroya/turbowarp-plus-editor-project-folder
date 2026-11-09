@@ -30,10 +30,13 @@
   },
   "scripts": {
     "build": "vite build && tsc -p tsconfig.json",
-    "test": "npm run build && node --test",
-    "prepack": "npm run build"
+    "test": "npm run build && node --test test/*.test.js",
+    "prepack": "npm run build",
+    "test:browser": "npm run build && node --test test/*.browser.js"
   },
   "devDependencies": {
+    "@kubohiroya/turbowarp-plus-editor-test-runtime": "0.1.0",
+    "@playwright/test": "1.64.1",
     "typescript": "6.0.3",
     "vite": "8.3.5"
   }

@@ -19,3 +19,6 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+      # Integration with the Editor's pinned VM and Scratch Blocks, on the minimal editor runtime.
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:browser
