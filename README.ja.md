@@ -12,6 +12,16 @@ TurboWarp Plus Editor で既存の sb3-toolchain v1 の作品フォルダを開�
 
 ホストは VM、メニューコンポーネント、作品状態を扱うコールバックを渡します。メニューからフォルダを開くには、ブラウザーが File System Access のフォルダ選択に対応している必要があります。ブロック、変数・リスト、スプライトの位置や大きさなどの項目、モニター、組み込みの拡張機能の編集を作品データ（`project.source.json`）に保存し、作品の実行で変わった状態も含みます。スプライトの追加・削除・名前の変更と、コスチューム・音の追加・削除も保存します。新しいアセットのファイルを先に書き、`sb3-source.json` と作品データを書いてから、参照されなくなったアセットのファイルを消します。カスタム拡張機能・埋め込み拡張・フォントを含む作品は開けません。 [Editor #305](https://github.com/kubohiroya/turbowarp-plus-editor/issues/305) · [Editor #308](https://github.com/kubohiroya/turbowarp-plus-editor/issues/308)
 
+## フォルダの一覧
+
+`./explorer`（`@kubohiroya/turbowarp-plus-editor-project-folder/explorer`）は、エディターのサイドパネルに置くフォルダのツリーです。[Headless Tree](https://headless-tree.lukasbach.com/) を同梱しています。描画にはホストの React 16.14〜18 を使います（省略可能な peer dependency）。メインの入口は React を使いません。
+
+- `ProjectFolderExplorer` は `directory`（作品フォルダまたはリポジトリのルート）を表示します。フォルダは開いたときに読み込み、ファイルより先に並べます。`.git` は表示しません。矢印キー・Home・End で移動と開閉をします。ファイルで Enter・Space を押すかクリックすると `onOpen({path, name, kind})` を呼びます。props は `directory`、`locale`（`ja…` で日本語、それ以外は英語）、`descriptions` と `marks`（Git の状態: `added`・`modified`・`deleted`・`untracked`、どちらも `directory` からの相対パスがキー）、`onOpen`、`label`（ツリーのアクセシブルな名前）です。読み込めないフォルダは、ツリーの中にメッセージを表示します。
+- 各行には文字色で描いたアイコンが付きます。開いた・閉じたフォルダ、作品データ（`project.source.json`・`sb3-source.json`）、JSON、画像、音、コード（`.js`・`.mjs`・`.ts`）、テキスト（`.md`・`.txt`）、その他のファイルです。画像（`.svg`・`.png`・`.jpg`・`.jpeg`・`.gif`・`.bmp`・`.webp`）は、行が画面に入るとサムネイルを表示します。2 MiB を超えるファイルと読み込めない画像はアイコンのままです。サムネイルは装飾用の `<img>` で、オブジェクト URL は行がなくなると解放します。
+- `describeProjectFolder(project, locale, {manifest, folder})` は `descriptions` を作ります。`project.source.json`・`sb3-source.json`・`embedded-extensions.json` の説明と、各アセットのファイルを使うコスチューム・背景・音を返します。`manifest` から `assetsDirectory` を読みます。`folder` はツリーのルートから見た作品フォルダのパスです。
+
+読み取り専用です。ファイルの作成・削除・名前の変更はできません。文字入力による検索もありません。
+
 ## 外部変更
 
 ホストが `host.blockReload` を渡すと、表示中は 2 秒ごと、ウィンドウにフォーカスが戻ったとき、ブラウザーが対応していれば `FileSystemObserver` の通知で、開いているフォルダを確認します。Editor の外でフォルダが変わると通知を表示します。
@@ -28,7 +38,7 @@ TurboWarp Plus Editor で既存の sb3-toolchain v1 の作品フォルダを開�
 
 ## 開発
 
-Node.js 26 で `npm ci` と `npm test` を実行します。Vite で JavaScript、TypeScript で型宣言を生成します。ホストとの接続検証には `npm pack` で作る tarball を使います。`npm run test:browser` は、最小 editor runtime（`@kubohiroya/turbowarp-plus-editor-test-runtime`）の上で、フォルダの外部変更と本物の VM・ワークスペースとの結合を Chromium で試します。Editor が固定する VM と Scratch Blocks を使い、Editor のビルドは要りません。
+Node.js 26 で `npm ci` と `npm test` を実行します。Vite で JavaScript、TypeScript で型宣言を生成します。ホストとの接続検証には `npm pack` で作る tarball を使います。`npm run test:browser` は、最小 editor runtime（`@kubohiroya/turbowarp-plus-editor-test-runtime`）の上で、フォルダの外部変更と本物の VM・ワークスペースとの結合を Chromium で試します。Editor が固定する VM と Scratch Blocks を使い、Editor のビルドは要りません。フォルダの一覧も、React 16.14 で実際の一時フォルダを表示して試します。`TWPF_EXPLORER_SCREENSHOT` にファイルのパスを入れると、その画面を保存します。
 
 Editor のヘッドレス統合テストは実ディスク上のフォルダを使い、選択画面の操作を差し替えます。OS のフォルダ選択画面を確認するときは、使い捨ての sb3-toolchain v1 作品を **ファイル → プロジェクトフォルダを開く…** から選び、読み書きを許可します。標準ブロックを変更し、**ファイル → プロジェクトフォルダに保存** を選びます。選んだフォルダの `project.source.json` が更新されたことを確かめ、同じフォルダを開き直して編集が反映されることを確認します。
 

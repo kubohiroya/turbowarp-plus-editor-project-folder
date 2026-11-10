@@ -14,6 +14,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./explorer": {
+      "types": "./dist/explorer.d.ts",
+      "default": "./dist/explorer.js"
     }
   },
   "files": [
@@ -35,9 +39,27 @@
     "test:browser": "npm run build && node --test test/*.browser.js"
   },
   "devDependencies": {
+    "@headless-tree/core": "1.8.0",
+    "@headless-tree/react": "1.8.0",
     "@kubohiroya/turbowarp-plus-editor-test-runtime": "0.1.0",
     "@playwright/test": "1.64.1",
+    "@types/react": "16.14.62",
+    "@types/react-dom": "16.9.24",
+    "react": "16.14.0",
+    "react-dom": "16.14.0",
     "typescript": "6.0.3",
     "vite": "8.3.5"
+  },
+  "peerDependencies": {
+    "react": ">=16.14 <19",
+    "react-dom": ">=16.14 <19"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    },
+    "react-dom": {
+      "optional": true
+    }
   }
 }
