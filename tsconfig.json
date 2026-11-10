@@ -5,6 +5,7 @@
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "types": [],
+    "jsx": "react",
     "strict": true,
     "verbatimModuleSyntax": true,
     "declaration": true,
@@ -12,5 +13,5 @@
     "rootDir": "src",
     "outDir": "dist"
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts", "src/**/*.tsx"]
 }
