@@ -111,12 +111,16 @@ const failure = (error: unknown, message: Message) =>
 const prefix = 'twpf-explorer';
 // Colors come from the host's text color, so the tree follows light and dark themes.
 const css = `.${prefix}{font:inherit;color:inherit}
-.${prefix}-item{display:flex;align-items:baseline;gap:.4em;width:100%;box-sizing:border-box;margin:0;border:0;border-radius:3px;
+.${prefix}-item{display:flex;align-items:center;gap:.4em;width:100%;box-sizing:border-box;margin:0;border:0;border-radius:3px;
 padding-block:.15em;padding-inline-end:.4em;background:none;color:inherit;font:inherit;text-align:start;cursor:pointer;white-space:nowrap}
 .${prefix}-item:hover{background:rgba(128,128,128,.12)}
 .${prefix}-item[aria-selected="true"]{background:rgba(128,128,128,.24)}
 .${prefix}-item:focus-visible{outline:2px solid currentColor;outline-offset:-2px}
 .${prefix}-caret{display:inline-block;width:1em;flex:none;text-align:center}
+.${prefix}-icon{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;flex:none}
+.${prefix}-icon img{width:20px;height:20px;object-fit:contain;border-radius:2px;
+background:repeating-conic-gradient(rgba(128,128,128,.22) 0 25%,transparent 0 50%) 0 0/8px 8px}
+.${prefix}-icon img[hidden]{display:none}
 .${prefix}-name{overflow:hidden;text-overflow:ellipsis}
 .${prefix}-mark{flex:none;font-size:.85em;padding:0 .3em;border:1px solid currentColor;border-radius:3px;opacity:.85}
 .${prefix}-description{overflow:hidden;text-overflow:ellipsis;opacity:.7;font-size:.9em}
@@ -124,9 +128,93 @@ padding-block:.15em;padding-inline-end:.4em;background:none;color:inherit;font:i
 
 const indent = (level: number) => ({paddingInlineStart: `${0.25 + level * 1.1}em`});
 
+type IconKind = 'folder' | 'folder-open' | 'project' | 'json' | 'image' | 'sound' | 'code' | 'text' | 'file';
+const page = 'M3.5 1.5h6l3 3v10h-9z';
+const corner = 'M9.5 1.5v3h3';
+// 16px outlines drawn with currentColor, so they follow the host's text color.
+const icons: Record<IconKind, string[]> = {
+    'folder': ['M1.5 3.5h4l1.5 1.5h7.5v8h-13z'],
+    'folder-open': ['M1.5 13V3.5h4l1.5 1.5h6v2', 'M1.5 13l2-6h11l-2 6z'],
+    'project': ['M8 1.5l6 3v7l-6 3-6-3v-7z', 'M2 4.5l6 3 6-3', 'M8 7.5v7'],
+    'json': [page, corner, 'M7 7c-1 0-1 .6-1 1.4s-.3 1.1-.8 1.1c.5 0 .8.4.8 1.1S6 12 7 12',
+        'M9 7c1 0 1 .6 1 1.4s.3 1.1.8 1.1c-.5 0-.8.4-.8 1.1S10 12 9 12'],
+    'image': ['M1.5 2.5h13v11h-13z', 'M1.5 11l4-4 3 3 2-2 4 4', 'M12.2 5.5a1.2 1.2 0 1 1-2.4 0a1.2 1.2 0 1 1 2.4 0'],
+    'sound': ['M2 6h3l3.5-3v10L5 10H2z', 'M10.5 5.5a3.5 3.5 0 0 1 0 5', 'M12.5 3.5a6.5 6.5 0 0 1 0 9'],
+    'code': ['M5.5 4.5L2 8l3.5 3.5', 'M10.5 4.5L14 8l-3.5 3.5', 'M9 3l-2 10'],
+    'text': [page, corner, 'M5.5 7.5h5M5.5 9.5h5M5.5 11.5h3'],
+    'file': [page, corner]
+};
+const extensionIcons: Record<string, IconKind> = {
+    json: 'json', svg: 'image', png: 'image', jpg: 'image', jpeg: 'image', gif: 'image', bmp: 'image', webp: 'image',
+    wav: 'sound', mp3: 'sound', ogg: 'sound', js: 'code', mjs: 'code', ts: 'code', md: 'text', txt: 'text'
+};
+const iconFor = (name: string): IconKind => name === projectFile || name === manifestFile ? 'project' :
+    extensionIcons[name.slice(name.lastIndexOf('.') + 1).toLowerCase()] ?? 'file';
+// Larger images are left as icons: decoding them for a 20px preview costs more than it shows.
+const thumbnailLimit = 2 * 1024 * 1024;
+type Thumbnail = 'waiting' | 'loading' | 'loaded' | 'skipped' | 'failed';
+
+function Icon({kind, path, readFile}: {kind: IconKind; path: string; readFile?: (path: string) => Promise<File>}) {
+    const ref = React.useRef<HTMLSpanElement>(null);
+    const [state, setState] = React.useState<Thumbnail>('waiting');
+    const [url, setUrl] = React.useState<string>();
+    // A row keeps its path for its lifetime (rows are keyed by path, and a new directory remounts the tree).
+    React.useEffect(() => {
+        if (!readFile) return undefined;
+        let live = true;
+        let created: string | undefined;
+        const load = async () => {
+            setState('loading');
+            try {
+                const file = await readFile(path);
+                if (!live) return;
+                if (file.size > thumbnailLimit) return setState('skipped');
+                created = URL.createObjectURL(file);
+                setUrl(created);
+            } catch {
+                if (live) setState('failed');
+            }
+        };
+        // Only rows that are shown read their file, so a large assets folder does not read every image at once.
+        let observer: IntersectionObserver | undefined;
+        if (typeof IntersectionObserver === 'function' && ref.current) {
+            observer = new IntersectionObserver(entries => {
+                if (!entries.some(entry => entry.isIntersecting)) return;
+                observer?.disconnect();
+                void load();
+            });
+            observer.observe(ref.current);
+        } else {
+            void load();
+        }
+        return () => {
+            live = false;
+            observer?.disconnect();
+            if (created) URL.revokeObjectURL(created);
+        };
+    }, [path]);
+    return (
+        <span ref={ref} className={`${prefix}-icon`} aria-hidden="true" data-icon={kind}
+            data-thumbnail={readFile ? state : undefined}>
+            {state === 'loaded' ? null : (
+                <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="1.2"
+                    strokeLinecap="round" strokeLinejoin="round" focusable="false">
+                    {icons[kind].map(d => <path key={d} d={d} />)}
+                </svg>
+            )}
+            {/* An <img> never runs an SVG's scripts, unlike markup inserted into the page. */}
+            {url && state !== 'failed' ? (
+                <img src={url} alt="" decoding="async" hidden={state !== 'loaded'}
+                    onLoad={() => setState('loaded')} onError={() => setState('failed')} />
+            ) : null}
+        </span>
+    );
+}
+
 function Explorer({directory, locale, descriptions, marks, onOpen, label}: ProjectFolderExplorerProps) {
     const message = messagesFor(locale);
     const [handles] = React.useState(() => new Map<string, FileSystemDirectoryHandle>([[rootId, directory]]));
+    const [files] = React.useState(() => new Map<string, FileSystemFileHandle>());
     const [rootLoaded, setRootLoaded] = React.useState(false);
     const collator = React.useMemo(() => new Intl.Collator(locale, {numeric: true, sensitivity: 'base'}), [locale]);
 
@@ -137,6 +225,15 @@ function Explorer({directory, locale, descriptions, marks, onOpen, label}: Proje
         for (const name of id.split('/')) handle = await handle.getDirectoryHandle(name);
         handles.set(id, handle);
         return handle;
+    };
+    const readFile = async (path: string) => {
+        let handle = files.get(path);
+        if (!handle) {
+            const parts = path.split('/');
+            const name = parts.pop()!;
+            handle = await (parts.length ? await directoryAt(parts.join('/')) : directory).getFileHandle(name);
+        }
+        return handle.getFile();
     };
     const tree = useTree<Node>({
         rootItemId: rootId,
@@ -172,6 +269,7 @@ function Explorer({directory, locale, descriptions, marks, onOpen, label}: Proje
                         if (entry.kind === 'directory' && entry.name === '.git') continue;
                         const path = base + entry.name;
                         if (entry.kind === 'directory') handles.set(path, entry as FileSystemDirectoryHandle);
+                        else files.set(path, entry as FileSystemFileHandle);
                         nodes.push({name: entry.name, path, kind: entry.kind});
                     }
                     nodes.sort((a, b) => (a.kind === 'directory' ? 0 : 1) - (b.kind === 'directory' ? 0 : 1) ||
@@ -199,12 +297,15 @@ function Explorer({directory, locale, descriptions, marks, onOpen, label}: Proje
         const mark = data && data.kind !== 'error' ? marks?.get(data.path) : undefined;
         const markLabel = mark ? message.marks[mark] : '';
         const description = data && data.kind !== 'error' ? descriptions?.get(data.path) : undefined;
+        const icon = !data || data.kind === 'error' ? undefined :
+            folder ? (expanded ? 'folder-open' : 'folder') : iconFor(data.name);
         const accessibleName = [item.getItemName(), markLabel, description].filter(Boolean).join(message.separator);
         const rows = [
             <button {...item.getProps()} key={item.getId()} type="button" aria-label={accessibleName}
                 className={`${prefix}-item${data?.kind === 'error' ? ` ${prefix}-error` : ''}`} style={indent(level)}
                 data-path={data?.path}>
                 <span className={`${prefix}-caret`} aria-hidden="true">{folder ? (expanded ? '▾' : '▸') : ''}</span>
+                {icon ? <Icon kind={icon} path={data!.path} readFile={icon === 'image' ? readFile : undefined} /> : null}
                 <span className={`${prefix}-name`}>{item.getItemName()}</span>
                 {markLabel ? <span className={`${prefix}-mark`} aria-hidden="true">{markLabel}</span> : null}
                 {description ? <span className={`${prefix}-description`} aria-hidden="true">{description}</span> : null}

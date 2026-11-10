@@ -17,6 +17,7 @@ TurboWarp Plus Editor で既存の sb3-toolchain v1 の作品フォルダを開�
 `./explorer`（`@kubohiroya/turbowarp-plus-editor-project-folder/explorer`）は、エディターのサイドパネルに置くフォルダのツリーです。[Headless Tree](https://headless-tree.lukasbach.com/) を同梱しています。描画にはホストの React 16.14〜18 を使います（省略可能な peer dependency）。メインの入口は React を使いません。
 
 - `ProjectFolderExplorer` は `directory`（作品フォルダまたはリポジトリのルート）を表示します。フォルダは開いたときに読み込み、ファイルより先に並べます。`.git` は表示しません。矢印キー・Home・End で移動と開閉をします。ファイルで Enter・Space を押すかクリックすると `onOpen({path, name, kind})` を呼びます。props は `directory`、`locale`（`ja…` で日本語、それ以外は英語）、`descriptions` と `marks`（Git の状態: `added`・`modified`・`deleted`・`untracked`、どちらも `directory` からの相対パスがキー）、`onOpen`、`label`（ツリーのアクセシブルな名前）です。読み込めないフォルダは、ツリーの中にメッセージを表示します。
+- 各行には文字色で描いたアイコンが付きます。開いた・閉じたフォルダ、作品データ（`project.source.json`・`sb3-source.json`）、JSON、画像、音、コード（`.js`・`.mjs`・`.ts`）、テキスト（`.md`・`.txt`）、その他のファイルです。画像（`.svg`・`.png`・`.jpg`・`.jpeg`・`.gif`・`.bmp`・`.webp`）は、行が画面に入るとサムネイルを表示します。2 MiB を超えるファイルと読み込めない画像はアイコンのままです。サムネイルは装飾用の `<img>` で、オブジェクト URL は行がなくなると解放します。
 - `describeProjectFolder(project, locale, {manifest, folder})` は `descriptions` を作ります。`project.source.json`・`sb3-source.json`・`embedded-extensions.json` の説明と、各アセットのファイルを使うコスチューム・背景・音を返します。`manifest` から `assetsDirectory` を読みます。`folder` はツリーのルートから見た作品フォルダのパスです。
 
 読み取り専用です。ファイルの作成・削除・名前の変更はできません。文字入力による検索もありません。

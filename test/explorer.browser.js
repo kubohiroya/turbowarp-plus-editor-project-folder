@@ -4,19 +4,56 @@ import {mkdir, mkdtemp, readFile, rm, writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
+import zlib from 'node:zlib';
 import {chromium, expect} from '@playwright/test';
 import {build} from 'vite';
 
 // localhost is a secure context, which the File System Access API needs. Playwright answers every request.
 const origin = 'http://localhost:41016';
-const a = 'a'.repeat(32), c = 'c'.repeat(32);
+const a = 'a'.repeat(32), b = 'b'.repeat(32), c = 'c'.repeat(32);
 const asset = (id, name, format) => ({name, assetId: id, md5ext: `${id}.${format}`, dataFormat: format});
 const project = {targets: [
     {isStage: true, name: 'Stage', costumes: [asset(a, 'backdrop1', 'svg')], sounds: []},
-    {isStage: false, name: 'Cat', costumes: [asset(a, 'cat-a', 'svg')], sounds: [asset(c, 'Meow', 'wav')]}
+    {isStage: false, name: 'Cat', costumes: [asset(a, 'cat-a', 'svg'), asset(b, 'cat-b', 'png')], sounds: [asset(c, 'Meow', 'wav')]}
 ]};
 const manifest = {formatVersion: 1, project: 'project.source.json', embeddedExtensions: 'embedded-extensions.json',
-    assetsDirectory: 'assets', archiveEntries: ['project.json', `${a}.svg`, `${c}.wav`]};
+    assetsDirectory: 'assets', archiveEntries: ['project.json', `${a}.svg`, `${b}.png`, `${c}.wav`]};
+
+// A cat face, so the screenshot shows what a costume thumbnail looks like.
+const costumeSvg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">
+<path d="M8 6l10 9h12l10-9v20a16 16 0 0 1-32 0z" fill="#ffab19" stroke="#c77b00" stroke-width="2"/>
+<circle cx="18" cy="26" r="3" fill="#333"/><circle cx="30" cy="26" r="3" fill="#333"/>
+<path d="M21 33q3 3 6 0" fill="none" stroke="#333" stroke-width="2"/></svg>`;
+
+// A small RGBA PNG: a blue disc on a transparent background.
+function discPng(size) {
+    const chunk = (type, data) => {
+        const body = Buffer.concat([Buffer.from(type, 'latin1'), data]);
+        const out = Buffer.alloc(body.length + 8);
+        out.writeUInt32BE(data.length, 0);
+        body.copy(out, 4);
+        out.writeUInt32BE(zlib.crc32(body), body.length + 4);
+        return out;
+    };
+    const header = Buffer.alloc(13);
+    header.writeUInt32BE(size, 0);
+    header.writeUInt32BE(size, 4);
+    header[8] = 8; // bit depth
+    header[9] = 6; // RGBA
+    const rows = [];
+    for (let y = 0; y < size; y++) {
+        const row = Buffer.alloc(1 + size * 4);
+        for (let x = 0; x < size; x++) {
+            const inside = (x - size / 2 + 0.5) ** 2 + (y - size / 2 + 0.5) ** 2 < (size / 2 - 1) ** 2;
+            if (inside) row.set([76, 151, 255, 255], 1 + x * 4);
+        }
+        rows.push(row);
+    }
+    return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', header),
+        chunk('IDAT', zlib.deflateSync(Buffer.concat(rows))), chunk('IEND', Buffer.alloc(0))]);
+}
+// Over the explorer's 2 MiB thumbnail limit; its content is never read.
+const largeImage = Buffer.alloc(2 * 1024 * 1024 + 1);
 
 async function bundleHarness(t) {
     const out = await mkdtemp(path.join(tmpdir(), 'twpf-explorer-harness-'));
@@ -35,7 +72,7 @@ async function bundleHarness(t) {
 async function makeFolder(t) {
     const folder = await mkdtemp(path.join(process.platform === 'darwin' ? '/private/tmp' : tmpdir(), 'twpf-explorer-'));
     t.after(() => rm(folder, {recursive: true, force: true}));
-    const write = (name, value) => writeFile(path.join(folder, name), typeof value === 'string' ? value : JSON.stringify(value));
+    const write = (name, value) => writeFile(path.join(folder, name), typeof value === 'string' || Buffer.isBuffer(value) ? value : JSON.stringify(value));
     for (const name of ['assets', 'docs', 'extensions', '.git']) await mkdir(path.join(folder, name));
     await write('project.source.json', project);
     await write('sb3-source.json', manifest);
@@ -44,7 +81,10 @@ async function makeFolder(t) {
     await write('.gitignore', 'node_modules\n');
     await write('.git/HEAD', 'ref: refs/heads/main\n');
     await write('docs/notes.txt', 'notes\n');
-    await write(`assets/${a}.svg`, '<svg xmlns="http://www.w3.org/2000/svg"/>');
+    await write('docs/scan.png', largeImage);
+    await write('extensions/hello.js', 'export default class {}\n');
+    await write(`assets/${a}.svg`, costumeSvg);
+    await write(`assets/${b}.png`, discPng(32));
     await write(`assets/${c}.wav`, 'RIFF');
     return folder;
 }
@@ -107,7 +147,7 @@ test('lists the folder with folders first and .git hidden, and loads a folder wh
     const svg = tree.getByRole('treeitem', {name: `${a}.svg, Stage · backdrop backdrop1, Cat · costume cat-a`});
     await expect(svg).toHaveAttribute('aria-level', '2');
     await expect(tree.getByRole('treeitem', {name: `${c}.wav, Cat · sound Meow`})).toHaveAttribute('aria-level', '2');
-    assert.deepEqual((await names(page)).slice(0, 3), ['assets', `${a}.svg`, `${c}.wav`]);
+    assert.deepEqual((await names(page)).slice(0, 4), ['assets', `${a}.svg`, `${b}.png`, `${c}.wav`]);
     assert.deepEqual(await page.evaluate(() => window.opened), [], 'a folder is not opened as a file');
 
     await svg.click();
@@ -138,6 +178,8 @@ test('moves, expands and opens with the keyboard', async t => {
     await page.keyboard.press('ArrowRight');
     await expect(item(`${a}.svg`)).toBeFocused();
     await page.keyboard.press('ArrowDown');
+    await expect(item(`${b}.png`)).toBeFocused();
+    await page.keyboard.press('ArrowDown');
     await expect(item(`${c}.wav`)).toBeFocused();
     await page.keyboard.press('Enter');
     assert.deepEqual(await page.evaluate(() => window.opened), [{path: `assets/${c}.wav`, name: `${c}.wav`, kind: 'file'}]);
@@ -165,8 +207,67 @@ test('shows Japanese labels and descriptions', async t => {
     await tree.getByRole('treeitem', {name: 'assets、コスチュームと音のファイル'}).click();
     await expect(tree.getByRole('treeitem', {name: `${a}.svg、ステージの背景 backdrop1、Cat のコスチューム cat-a`})).toBeVisible();
     await expect(tree.getByRole('treeitem', {name: `${c}.wav、Cat の音 Meow`})).toBeVisible();
+    await expect(page.locator('.twpf-explorer-icon img:not([hidden])')).toHaveCount(2);
     const screenshot = process.env.TWPF_EXPLORER_SCREENSHOT;
     if (screenshot) await page.locator('#root').screenshot({path: screenshot});
+});
+
+test('shows an icon for each kind of entry and thumbnails for images', async t => {
+    const page = await open(t);
+    await page.evaluate(() => window.renderExplorer('en'));
+    const tree = page.getByRole('tree');
+    const row = file => tree.locator(`[data-path="${file}"]`);
+    const icon = file => row(file).locator('.twpf-explorer-icon');
+    const expectIcons = async kinds => {
+        for (const [file, kind] of Object.entries(kinds)) await expect(icon(file), file).toHaveAttribute('data-icon', kind);
+    };
+    await expectIcons({'assets': 'folder', 'docs': 'folder', 'extensions': 'folder', '.gitignore': 'file',
+        'embedded-extensions.json': 'json', 'project.source.json': 'project', 'sb3-source.json': 'project',
+        'README.md': 'text'});
+
+    const svgName = `${a}.svg, Stage · backdrop backdrop1, Cat · costume cat-a`;
+    await row('assets').click();
+    await row('docs').click();
+    await row('extensions').click();
+    await expectIcons({'assets': 'folder-open', [`assets/${a}.svg`]: 'image', [`assets/${b}.png`]: 'image',
+        [`assets/${c}.wav`]: 'sound', 'docs/notes.txt': 'text', 'docs/scan.png': 'image', 'extensions/hello.js': 'code'});
+
+    for (const file of [`assets/${a}.svg`, `assets/${b}.png`]) {
+        await expect(icon(file)).toHaveAttribute('data-thumbnail', 'loaded');
+        await expect(icon(file).locator('img')).toHaveAttribute('src', /^blob:/u);
+        await expect(icon(file).locator('img')).toHaveAttribute('alt', '');
+        await expect(icon(file).locator('svg')).toHaveCount(0);
+    }
+    await expect(row(`assets/${a}.svg`)).toHaveAttribute('aria-label', svgName);
+    await expect(tree.getByRole('treeitem', {name: svgName})).toBeVisible();
+    await expect(icon('docs/scan.png')).toHaveAttribute('data-thumbnail', 'skipped');
+    await expect(icon('docs/scan.png').locator('img')).toHaveCount(0);
+    await expect(icon('docs/scan.png').locator('svg')).toHaveCount(1);
+    await expect(icon(`assets/${c}.wav`)).not.toHaveAttribute('data-thumbnail');
+
+    // Collapsing a folder removes its rows, and their object URLs go with them.
+    const urls = await page.evaluate(() => window.objectUrls);
+    assert.equal(urls.created.length, 2);
+    await row('assets').click();
+    assert.deepEqual((await page.evaluate(() => window.objectUrls.revoked)).sort(), [...urls.created].sort());
+    await row('assets').click();
+    await expect(icon(`assets/${b}.png`)).toHaveAttribute('data-thumbnail', 'loaded');
+    await page.evaluate(() => window.unmountExplorer());
+    const after = await page.evaluate(() => window.objectUrls);
+    assert.equal(after.created.length, 4);
+    assert.deepEqual([...after.revoked].sort(), [...after.created].sort());
+});
+
+test('loads a thumbnail only when its row is shown', async t => {
+    const page = await open(t);
+    // The tree starts below the fold, and the folder is expanded without scrolling to it.
+    await page.addStyleTag({content: '#root{margin-top:150vh}'});
+    await page.evaluate(() => window.renderExplorer('en'));
+    await page.locator('[data-path="assets"]').evaluate(button => button.click());
+    const png = page.locator(`[data-path="assets/${b}.png"] .twpf-explorer-icon`);
+    await expect(png).toHaveAttribute('data-thumbnail', 'waiting');
+    await png.scrollIntoViewIfNeeded();
+    await expect(png).toHaveAttribute('data-thumbnail', 'loaded');
 });
 
 test('shows a message in the tree when the folder cannot be read', async t => {
