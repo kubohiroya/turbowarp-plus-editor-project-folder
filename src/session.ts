@@ -91,6 +91,14 @@ type VMAsset = {assetId: string; dataFormat: string; data?: Uint8Array};
 
 export function createFolderSession(vm: FolderVM, host: FolderHost) {
     let current: Session | null = null;
+    // Told when a folder opens or closes, and after a save, so a view of the folder can read it again.
+    const listeners = new Set<() => void>();
+    const notify = () => {for (const listener of [...listeners]) listener();};
+    const setCurrent = (session: Session | null) => {
+        if (current === session) return;
+        current = session;
+        notify();
+    };
     let busy = false;
     let disposed = false;
     let revision = 0;
@@ -142,7 +150,7 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
         return null;
     };
     const changed = () => {revision++;};
-    const loaded = () => {current = null;};
+    const loaded = () => setCurrent(null);
     vm.runtime.on('PROJECT_LOADED', loaded);
     vm.on('PROJECT_CHANGED', changed);
     const active = (session: Session) => {
@@ -152,7 +160,8 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
     };
     const dispose = () => {
         disposed = true;
-        current = null;
+        setCurrent(null);
+        listeners.clear();
         vm.runtime.off('PROJECT_LOADED', loaded);
         vm.off('PROJECT_CHANGED', changed);
     };
@@ -171,7 +180,7 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
             if (disposed || vm.runtime.getTargetForStage() !== priorStage) return 'cancelled';
             if (host.isProjectDirty() && !confirmReplace()) return 'cancelled';
             host.beforeLoad();
-            current = null;
+            setCurrent(null);
             const reader = readerFor(storage);
             const assets = source.storageAssets;
             reader.assets = assets;
@@ -186,7 +195,7 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
             if (disposed || !stage || vm.runtime.getTargetForStage() !== stage) return 'cancelled';
             host.onOpened(directory.name);
             const baseline = snapshot();
-            current = {source, stage, baseline, ids: identify(baseline), pending: null};
+            setCurrent({source, stage, baseline, ids: identify(baseline), pending: null});
             vm.renderer?.draw();
             return 'opened';
         } finally {
@@ -231,7 +240,12 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
     };
     const canApply = () => !host.isProjectDirty() && !host.blockReload?.isRunning();
     return {
-        detach() {current = null;},
+        detach() {setCurrent(null);},
+        /** Calls `listener` when a folder opens or closes, and after a save. Returns the function that stops it. */
+        subscribe(listener: () => void) {
+            listeners.add(listener);
+            return () => {listeners.delete(listener);};
+        },
         get canSave() {return current !== null;},
         get busy() {return busy;},
         get reloadState() {return reloadState();},
@@ -377,6 +391,7 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
                 const removed = [...source.bytes.keys()].filter(name => !needed.has(name));
                 if (!result && !removed.length && !extensionSave.removed.length) {
                     if (revision === saveRevision) host.onSaved();
+                    notify();
                     return {status: 'unchanged', sourceRemoved: []};
                 }
                 const encoder = new TextEncoder();
@@ -470,6 +485,7 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
                 session.ids = ids;
                 session.pending = null;
                 if (current === session && revision === saveRevision) host.onSaved();
+                notify();
                 return {status: 'saved', sourceRemoved: extensionSave.sourceRemoved};
             } finally {
                 busy = false;
