@@ -3,6 +3,8 @@ import {asyncDataLoaderFeature, hotkeysCoreFeature, selectionFeature} from '@hea
 import type {ItemInstance} from '@headless-tree/core';
 import {useTree} from '@headless-tree/react/react17';
 import {isObject, manifestFile, projectFile} from './source.js';
+import {followProjectFolder} from './folder-registry.js';
+import type {FollowedFolder} from './folder-registry.js';
 import type {Json, Project} from './source.js';
 
 export type ExplorerMark = 'added' | 'modified' | 'deleted' | 'untracked';
@@ -25,6 +27,7 @@ export type ProjectFolderExplorerProps = {
 const messages = {
     en: {
         label: 'Project folder', loading: 'Loading…', empty: 'This folder is empty.',
+        noFolder: 'Open a project folder to show its files here.', open: 'Open Project Folder…',
         failed: 'This folder could not be read.', denied: 'Permission to read this folder was not granted.',
         separator: ', ',
         marks: {added: 'Added', modified: 'Modified', deleted: 'Deleted', untracked: 'Untracked'},
@@ -37,6 +40,7 @@ const messages = {
     },
     ja: {
         label: '作品フォルダ', loading: '読み込んでいます…', empty: 'このフォルダは空です。',
+        noFolder: 'プロジェクトフォルダを開くと、ここにファイルを表示します。', open: 'プロジェクトフォルダを開く…',
         failed: 'このフォルダを読み込めません。', denied: 'このフォルダを読む許可がありません。',
         separator: '、',
         marks: {added: '追加', modified: '変更', deleted: '削除', untracked: '未追跡'},
@@ -124,7 +128,10 @@ background:repeating-conic-gradient(rgba(128,128,128,.22) 0 25%,transparent 0 50
 .${prefix}-name{overflow:hidden;text-overflow:ellipsis}
 .${prefix}-mark{flex:none;font-size:.85em;padding:0 .3em;border:1px solid currentColor;border-radius:3px;opacity:.85}
 .${prefix}-description{overflow:hidden;text-overflow:ellipsis;opacity:.7;font-size:.9em}
-.${prefix}-status{opacity:.7;font-style:italic;padding-block:.15em}`;
+.${prefix}-status{opacity:.7;font-style:italic;padding-block:.15em}
+.${prefix}-empty{padding:.5em}
+.${prefix}-empty p{margin:0 0 .6em}
+.${prefix}-empty button{color:inherit;background:transparent;border:1px solid currentColor;border-radius:4px;padding:.2em .6em;font:inherit;cursor:pointer}`;
 
 const indent = (level: number) => ({paddingInlineStart: `${0.25 + level * 1.1}em`});
 
@@ -346,4 +353,58 @@ const keyFor = (directory: FileSystemDirectoryHandle) => {
 export function ProjectFolderExplorer(props: ProjectFolderExplorerProps) {
     // A new directory starts a new tree, so cached entries and expanded folders never leak between folders.
     return <Explorer key={keyFor(props.directory)} {...props} />;
+}
+
+/** Follows marks for the files under `directory`, by path relative to it. Returns the function that stops it. */
+export type FollowMarks = (directory: FileSystemDirectoryHandle,
+    update: (marks: ReadonlyMap<string, ExplorerMark>) => void) => () => void;
+type FolderViewProps = {vm: object; locale?: string; marks?: FollowMarks};
+
+const readJson = async (directory: FileSystemDirectoryHandle, name: string): Promise<Json> =>
+    JSON.parse(await (await (await directory.getFileHandle(name)).getFile()).text());
+
+function FolderView({vm, locale, marks: followMarks}: FolderViewProps) {
+    const message = messagesFor(locale);
+    const [{folder, directory, version}, setFollowed] = React.useState<{
+        folder?: FollowedFolder; directory: FileSystemDirectoryHandle | null; version: number;
+    }>({directory: null, version: 0});
+    React.useEffect(() => followProjectFolder(vm, (folder, directory) =>
+        setFollowed(previous => ({folder, directory, version: previous.version + 1}))), [vm]);
+    // The descriptions come from the folder's project file as last saved, read again after each save.
+    const [descriptions, setDescriptions] = React.useState<ReadonlyMap<string, string>>();
+    React.useEffect(() => {
+        let current = true;
+        setDescriptions(undefined);
+        if (!directory) return;
+        Promise.all([readJson(directory, projectFile), readJson(directory, manifestFile).catch(() => undefined)]).then(([project, manifest]) => {
+            if (current && isObject(project)) setDescriptions(describeProjectFolder(project as Project, locale, {manifest}));
+        }, () => {});
+        return () => {current = false;};
+    }, [directory, version, locale]);
+    const [marks, setMarks] = React.useState<ReadonlyMap<string, ExplorerMark>>();
+    React.useEffect(() => {
+        setMarks(undefined);
+        if (!directory || !followMarks) return;
+        return followMarks(directory, setMarks);
+    }, [directory, followMarks]);
+    if (!folder) return null;
+    if (!directory) {
+        return <div className={`${prefix}-empty`}>
+            <style>{css}</style>
+            <p>{message.noFolder}</p>
+            <button type="button" onClick={() => folder.open(locale ?? 'en')}>{message.open}</button>
+        </div>;
+    }
+    return <ProjectFolderExplorer directory={directory} locale={locale} descriptions={descriptions} marks={marks}/>;
+}
+
+/**
+ * Renders the explorer of the project folder open for `vm`, for a side panel of the host: its files with what each is
+ * for, and `marks` (such as the Git status) when given. It follows the folder as it opens, closes and saves; with no
+ * folder open it offers Open Project Folder…, and it renders nothing while no project folder is mounted for `vm`.
+ * Pass the same `marks` function across renders, or the marks are followed again.
+ */
+export function renderProjectFolderExplorer(createElement: (component: any, props: any, ...children: any[]) => any,
+    {vm, locale = 'en', marks}: FolderViewProps) {
+    return createElement(FolderView, {vm, locale, marks});
 }
