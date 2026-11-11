@@ -90,7 +90,7 @@ test('matches sprites by runtime id: a rename keeps the folder entry, and sprite
     assert.equal(plain(projectChanges(folderProject(), before, renamed)).targets[1].folderOnly, undefined);
 });
 
-test('accepts new and removed costumes, and refuses unsupported assets and custom fonts', () => {
+test('accepts new and removed costumes, and refuses invalid asset and font references', () => {
     const before = editorProject();
     const newCostume = clone(before);
     newCostume.targets[1].costumes.push(costume('c'.repeat(32), 'cat2'));
@@ -102,7 +102,7 @@ test('accepts new and removed costumes, and refuses unsupported assets and custo
     unsupportedFormat.targets[1].sounds.push({name: 'clip', assetId: 'd'.repeat(32), dataFormat: 'ogg', md5ext: `${'d'.repeat(32)}.ogg`});
     assert.throws(() => projectChanges(folderProject(), before, unsupportedFormat), scope);
     const custom = clone(before);
-    custom.customFonts = [];
+    custom.customFonts = [{system: false, family: 'Embedded', fallback: 'Serif', md5ext: 'invalid.woff2'}];
     assert.throws(() => projectChanges(folderProject(), before, custom), scope);
 });
 

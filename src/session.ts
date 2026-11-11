@@ -1,6 +1,6 @@
 import {assetKey, assetTypeFor, assertFolderUnchanged, extensionsFile, fileVersion, FolderError, manifestFile, parseProject,
     planExtensionSave, projectAssets, projectChanges, projectFile, readFolder, readFolderUpdate, sameBytes, unsupported} from './source.js';
-import type {Asset, FolderSource, FolderUpdate, JsonObject, Project, Storage} from './source.js';
+import type {Asset, AssetKind, FolderSource, FolderUpdate, JsonObject, Project, Storage} from './source.js';
 import {applyBlockReload, planBlockReload} from './block-reload.js';
 import type {ReloadTarget} from './block-reload.js';
 import {applyScriptReload, planScriptReload} from './script-reload.js';
@@ -19,6 +19,7 @@ export interface FolderVM {
     quit(): void;
     loadProject(project: string, options?: {replaceLegacyExtensions: boolean}): Promise<unknown>;
     toJSON(target?: string, options?: {allowOptimization: boolean}): string;
+    assets?: readonly (Asset | null | undefined)[];
     renderer?: {draw(): void};
 }
 
@@ -128,7 +129,10 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
         }
     };
     // The bytes of an asset the Editor holds, such as a costume added since the folder was opened.
-    const assetData = (name: string) => {
+    const assetData = (name: string, kind: AssetKind) => {
+        if (kind === 'fonts') {
+            return vm.assets?.find(asset => asset && `${asset.assetId}.${asset.dataFormat}` === name)?.data;
+        }
         for (const target of runtimeTargets()) {
             for (const entry of [...target.sprite?.costumes ?? [], ...target.sprite?.sounds ?? []]) {
                 const asset = entry.asset;
@@ -363,7 +367,7 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
                 const added = new Map<string, Uint8Array>();
                 for (const [name, kind] of needed) {
                     if (source.bytes.has(name)) continue;
-                    const data = assetData(name);
+                    const data = assetData(name, kind);
                     if (!data) return unsupported(`The data of ${name} is not in the Editor`);
                     const [id, format] = name.split('.');
                     const asset = vm.runtime.storage.createAsset(assetTypeFor(vm.runtime.storage, kind, format), format, data.slice(), null, true);

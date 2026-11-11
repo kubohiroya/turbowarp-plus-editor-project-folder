@@ -12,9 +12,11 @@ TurboWarp Plus Editor で既存の sb3-toolchain v1 の作品フォルダを開�
 
 ホストは VM、メニューコンポーネント、作品状態を扱うコールバックを渡します。メニューからフォルダを開くには、ブラウザーが File System Access のフォルダ選択に対応している必要があります。ブロック、変数・リスト、スプライトの位置や大きさなどの項目、モニター、組み込みの拡張機能の編集を作品データ（`project.source.json`）に保存し、作品の実行で変わった状態も含みます。スプライトの追加・削除・名前の変更と、コスチューム・音の追加・削除も保存します。新しいアセットのファイルを先に書き、`sb3-source.json` と作品データを書いてから、参照されなくなったアセットのファイルを消します。 [Editor #305](https://github.com/kubohiroya/turbowarp-plus-editor/issues/305) · [Editor #308](https://github.com/kubohiroya/turbowarp-plus-editor/issues/308)
 
+システムフォントと Web フォントの参照は作品データに保持し、埋め込みフォントは `assets/` に保存します。 [Editor #495](https://github.com/kubohiroya/turbowarp-plus-editor/issues/495)
+
 ## 拡張機能
 
-埋め込み拡張の参照は、フォルダを開く際に `extensions/<id>.js` の内容とマニフェストから data URL に復元します。URL で指定されたカスタム拡張も、Editor の既存の許可画面を経て読み込みます。 `turboWarpPlus` のマニフェストとカスタムフォントを含む作品フォルダは対象外です。 [Editor #496](https://github.com/kubohiroya/turbowarp-plus-editor/issues/496) · [Editor #495](https://github.com/kubohiroya/turbowarp-plus-editor/issues/495)
+埋め込み拡張の参照は、フォルダを開く際に `extensions/<id>.js` の内容とマニフェストから data URL に復元します。URL で指定されたカスタム拡張も、Editor の既存の許可画面を経て読み込みます。 `turboWarpPlus` のマニフェストとカスタムフォントを含む作品フォルダは対象外です。 [Editor #496](https://github.com/kubohiroya/turbowarp-plus-editor/issues/496)
 
 保存時は変更のあったスクリプト、拡張のマニフェスト、作品データの順に書き、参照がなくなったファイルを最後に削除します。変更のないスクリプトと拡張のマニフェストはバイト列を保ちます。差し替えで `source` と対応する API マニフェストを外した場合は、保存時に該当する ID を通知します。2 件未満になったバンドル設定は削除します。module バンドルは管理対象の npm モジュールを必要とするため、差し替えで `source` を失った拡張も設定から外れます。
 
