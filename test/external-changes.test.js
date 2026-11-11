@@ -24,7 +24,13 @@ function folder(initial) {
                 return new File([file.text], name, {lastModified: file.lastModified});
             }};
         },
-        async getDirectoryHandle() {return {values: () => []};}
+        async getDirectoryHandle(prefix) {
+            return {
+                getFileHandle: name => directory.getFileHandle(`${prefix}/${name}`),
+                values: () => [...files.keys()].filter(name => name.startsWith(`${prefix}/`))
+                    .map(name => ({kind: 'file', name: name.slice(prefix.length + 1)}))
+            };
+        }
     };
     return {directory, write, writeProject: project => write('project.source.json', stringify(project))};
 }
@@ -291,8 +297,7 @@ test('notes edits the folder cannot save and still shows the folder changes', as
     t.after(() => editor.mounted.dispose());
     await editor.open();
     const toJSON = editor.vm.toJSON;
-    // A custom extension added in the Editor is outside what Save can write.
-    editor.vm.toJSON = (...args) => JSON.stringify({...JSON.parse(toJSON(...args)), extensionURLs: {custom: 'https://example.invalid/custom.js'}});
+    editor.vm.toJSON = (...args) => JSON.stringify({...JSON.parse(toJSON(...args)), customFonts: []});
     editor.state.dirty = true;
     editor.disk.writeProject(projectAt({x: 5, y: 5}));
     await editor.scan();
@@ -302,4 +307,42 @@ test('notes edits the folder cannot save and still shows the folder changes', as
     assert.deepEqual(requests[0].sections.map(section => section.title), ['Changes in the folder']);
     assert.equal(requests[0].notes.length, 1);
     assert.equal(editor.state.loads.length, 1, 'closing the dialog keeps the edits');
+});
+
+test('extension files, metadata and references wait for a validated whole reload', async t => {
+    const initial = {...projectAt({x: 0, y: 0}), extensionURLs: {embedded: 'embedded-extension:extensions/embedded.js'}};
+    const editor = setup({initial});
+    t.after(() => editor.mounted.dispose());
+    const manifest = {formatVersion: 1, extensions: [
+        {id: 'embedded', path: 'extensions/embedded.js', mediaType: 'text/javascript', parameters: [], encoding: 'base64'}
+    ]};
+    editor.disk.write('embedded-extensions.json', stringify(manifest));
+    editor.disk.write('extensions/embedded.js', 'first');
+    await editor.open();
+    assert.equal(editor.state.loads[0].extensionURLs.embedded, 'data:text/javascript;base64,Zmlyc3Q=');
+
+    editor.disk.write('extensions/embedded.js', 'other');
+    await editor.scan();
+    await editor.runTimers();
+    assert.equal(editor.button.textContent, 'Reload Whole Project');
+    assert.equal(editor.state.loads.length, 1);
+    editor.button.click();
+    await settle();
+    assert.equal(editor.state.loads.at(-1).extensionURLs.embedded, 'data:text/javascript;base64,b3RoZXI=');
+
+    manifest.extensions[0].encoding = 'percent';
+    editor.disk.write('embedded-extensions.json', stringify(manifest));
+    await editor.scan();
+    assert.equal(editor.button.textContent, 'Reload Whole Project');
+    assert.equal(editor.state.loads.length, 2);
+    editor.button.click();
+    await settle();
+    assert.equal(editor.state.loads.at(-1).extensionURLs.embedded, 'data:text/javascript,%6F%74%68%65%72');
+
+    editor.disk.writeProject({...initial, extensionURLs: {embedded: 'embedded-extension:extensions/wrong.js'}});
+    await editor.scan();
+    assert.equal(editor.button.textContent, 'Reload Whole Project');
+    editor.button.click();
+    await settle();
+    assert.equal(editor.state.loads.length, 3, 'invalid references never reach the VM');
 });

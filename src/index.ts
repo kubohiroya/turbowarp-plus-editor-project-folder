@@ -11,6 +11,7 @@ const messages = {
         open: 'Open Project Folder…', save: 'Save to Project Folder',
         replace: 'Replace the open project and discard its unsaved changes?',
         opened: 'Project folder opened.', saved: 'Project folder saved.', unchanged: 'No changes to save.',
+        sourceRemoved: (ids: string[]) => `Removed source metadata for replaced extensions: ${ids.join(', ')}. Use sb3-toolchain to fetch the managed sources again if you need to keep their provenance.`,
         conflict: 'The project folder changed outside the editor or is no longer open. Your edits are still in the editor.',
         unsupported: 'This project or edit cannot be saved to a project folder yet.',
         failed: 'Could not access the project folder.',
@@ -31,6 +32,7 @@ const messages = {
         open: 'プロジェクトフォルダを開く…', save: 'プロジェクトフォルダに保存',
         replace: '未保存の変更を破棄して、別の作品を開きますか？',
         opened: 'プロジェクトフォルダを開きました。', saved: 'プロジェクトフォルダに保存しました。', unchanged: '保存する変更はありません。',
+        sourceRemoved: (ids: string[]) => `差し替えた拡張機能（${ids.join('、')}）の出どころ情報を削除しました。出どころを保つには、sb3-toolchain で拡張機能を取得し直してください。`,
         conflict: '外部でフォルダが変更されたか、作品が切り替わりました。編集中の変更はエディターに残っています。',
         unsupported: 'この作品または編集は、まだプロジェクトフォルダに保存できません。',
         failed: 'プロジェクトフォルダにアクセスできませんでした。',
@@ -229,7 +231,11 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
         },
         save(locale) {
             if (!session.busy) {
-                void session.save().then(result => report(messageFor(locale)[result]), error => fail(locale, error)).finally(renderReload);
+                const message = messageFor(locale);
+                void session.save().then(({status, sourceRemoved}) => {
+                    const detail = sourceRemoved.length ? ` ${message.sourceRemoved(sourceRemoved)}` : '';
+                    report(message[status] + detail);
+                }, error => fail(locale, error)).finally(renderReload);
                 renderReload();
             }
         }
