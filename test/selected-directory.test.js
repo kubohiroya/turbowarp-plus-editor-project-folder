@@ -60,7 +60,9 @@ test('opens an already selected project with the host confirmation and without c
 
     assert.equal(await session.openDirectory(directory, () => false), 'cancelled');
     assert.deepEqual(loaded, []);
+    assert.equal(session.directory, null);
     assert.equal(await session.openDirectory(directory, () => true), 'opened');
     assert.deepEqual(loaded, [project]);
     assert.deepEqual(opened, ['Selected project']);
+    assert.equal(session.directory, directory, 'the host can tell which folder the loaded project came from');
 });

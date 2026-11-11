@@ -9,6 +9,7 @@ This package opens and saves existing sb3-toolchain v1 project folders in TurboW
 - `mountProjectFolder({vm, document, host})` attaches the folder session to a workspace. Call `dispose()` when the workspace is replaced.
 - `renderProjectFolderMenu(createElement, props)` supplies the existing open and save commands to the host's file menu.
 - The mounted session's `openDirectory(handle, confirmReplace)` accepts a directory handle already selected by the host. It uses the same project validation and unsaved-edit confirmation as the file menu. Save still targets the opened folder.
+- The mounted session's `directory` is the folder the loaded project came from. It becomes `null` once another project loads or the folder is detached, so a host can tell projects apart by it.
 
 The host supplies the VM, menu components, and project state callbacks. The browser must support the File System Access picker for the built-in open command. Save writes block, variable, list, sprite property, monitor and built-in extension edits to the project file, including state that changes while the project runs. Sprites can be added, removed and renamed, and costumes and sounds added or removed: new asset files are written first, then `sb3-source.json` and the project file, and asset files nothing refers to are deleted last. See [Editor issue #305](https://github.com/kubohiroya/turbowarp-plus-editor/issues/305) and [issue #308](https://github.com/kubohiroya/turbowarp-plus-editor/issues/308).
 
