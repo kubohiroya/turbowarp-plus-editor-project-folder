@@ -48,7 +48,7 @@ export function parseProject(text: string): Project {
 export interface AssetType {name: string}
 export interface Asset {assetId: string; dataFormat: string; data: Uint8Array}
 export interface Storage {
-    AssetType: {Sound: AssetType; ImageVector: AssetType; ImageBitmap: AssetType};
+    AssetType: {Sound: AssetType; ImageVector: AssetType; ImageBitmap: AssetType; Font?: AssetType};
     createAsset(type: AssetType, format: string, data: Uint8Array, id: null, generateId: true): Asset;
     addHelper(helper: {load(type: AssetType, id: string, format: string): Promise<Asset> | null}, priority: number): void;
 }
@@ -85,8 +85,13 @@ const sameNames = (actual: Set<string>, expected: Iterable<string>) => {
     return actual.size === expectedNames.size && [...actual].every(name => expectedNames.has(name));
 };
 
-export const assetTypeFor = (storage: Storage, kind: 'costumes' | 'sounds', format: string) => kind === 'sounds' ?
-    storage.AssetType.Sound : format === 'svg' ? storage.AssetType.ImageVector : storage.AssetType.ImageBitmap;
+export type AssetKind = 'costumes' | 'sounds' | 'fonts';
+
+export const assetTypeFor = (storage: Storage, kind: AssetKind, format: string): AssetType => {
+    if (kind === 'fonts') return storage.AssetType.Font ?? unsupported('The editor does not support font assets');
+    if (kind === 'sounds') return storage.AssetType.Sound;
+    return format === 'svg' ? storage.AssetType.ImageVector : storage.AssetType.ImageBitmap;
+};
 export const assetKey = (type: AssetType, id: string, format: string) => `${type.name}/${id}.${format}`;
 
 type DataUrlMetadata = {mediaType: string; parameters: string[]; encoding: 'base64' | 'percent'};
@@ -278,29 +283,10 @@ export async function readFolder(directory: FileSystemDirectoryHandle, storage: 
         manifest.assetsDirectory !== 'assets' || !Array.isArray(manifest.archiveEntries)) {
         return unsupported('Expected an sb3-toolchain v1 folder');
     }
-    if (customContent(project)) return unsupported('Plus extension manifests and custom fonts are not supported in project folders');
+    if (project.turboWarpPlus !== undefined) return unsupported('Plus extension manifests are not supported in project folders');
     const extensionManifest = validateExtensions(project, embedded);
-    const expected = new Set(['project.json']);
-    const references = new Map<string, {id: string; format: string; type: AssetType; name: string}>();
-    for (const target of project.targets) {
-        for (const kind of ['costumes', 'sounds'] as const) {
-            const entries = target[kind] ?? [];
-            if (!Array.isArray(entries)) return unsupported('Invalid asset list');
-            for (const entry of entries) {
-                if (!isObject(entry) || typeof entry.assetId !== 'string' || !/^[a-f0-9]{32}$/u.test(entry.assetId) ||
-                    typeof entry.dataFormat !== 'string') return unsupported('Invalid asset reference');
-                const {assetId: id, dataFormat: format} = entry;
-                const name = `${id}.${format}`;
-                const type = kind === 'sounds' ?
-                    (/^(wav|mp3)$/u.test(format) ? storage.AssetType.Sound : null) :
-                    (format === 'svg' ? storage.AssetType.ImageVector :
-                        (/^(png|bmp|jpg|jpeg|gif)$/u.test(format) ? storage.AssetType.ImageBitmap : null));
-                if (!type || entry.md5ext !== name) return unsupported(`Unsupported asset reference: ${name}`);
-                expected.add(name);
-                references.set(assetKey(type, id, format), {id, format, type, name});
-            }
-        }
-    }
+    const references = projectAssets(project);
+    const expected = new Set(['project.json', ...references.keys()]);
     if (manifest.archiveEntries.length !== expected.size || !sameNames(new Set(manifest.archiveEntries as string[]), expected)) {
         return unsupported('Asset references and archiveEntries do not match');
     }
@@ -318,10 +304,12 @@ export async function readFolder(directory: FileSystemDirectoryHandle, storage: 
             [entry.id, encodeDataUrl(entry, extensionBytes.get(`${entry.id}.js`)!)]))
     }}) : projectText;
     const storageAssets = new Map<string, Asset>();
-    for (const [key, {id, format, type, name}] of references) {
+    for (const [name, kind] of references) {
+        const [id, format] = name.split('.');
+        const type = assetTypeFor(storage, kind, format);
         const asset = storage.createAsset(type, format, bytes.get(name)!.slice(), null, true);
         if (asset.assetId !== id) return unsupported(`Asset hash mismatch: ${name}`);
-        storageAssets.set(key, asset);
+        storageAssets.set(assetKey(type, id, format), asset);
     }
     return {versions, files, directory, bytes, extensionBytes, project, loadText, storageAssets, embedded: extensionManifest};
 }
@@ -423,7 +411,7 @@ const applyChanges = (source: Json | undefined, before: Json, after: Json): Json
 
 /** The asset files a project refers to, by file name, with the kind of list that refers to each. */
 export const projectAssets = (project: Project) => {
-    const names = new Map<string, 'costumes' | 'sounds'>();
+    const names = new Map<string, AssetKind>();
     for (const target of project.targets) {
         for (const kind of ['costumes', 'sounds'] as const) {
             const entries = target[kind] ?? [];
@@ -440,9 +428,17 @@ export const projectAssets = (project: Project) => {
             }
         }
     }
+    const fonts = project.customFonts ?? [];
+    if (!Array.isArray(fonts)) return unsupported('Invalid customFonts list');
+    for (const font of fonts) {
+        if (!isObject(font) || font.system !== false) continue;
+        if (typeof font.md5ext !== 'string' || !/^[a-f0-9]{32}\.(ttf|otf|woff2?)$/u.test(font.md5ext)) {
+            return unsupported('Invalid font asset reference');
+        }
+        names.set(font.md5ext, 'fonts');
+    }
     return names;
 };
-const customContent = (project: Project) => project.turboWarpPlus !== undefined || project.customFonts !== undefined;
 
 /** Runtime ids of the targets, in the order of the project's `targets`, so a renamed sprite stays the same sprite. */
 export type TargetIdentity = {before: readonly string[]; after: readonly string[]};
@@ -460,7 +456,7 @@ export function projectChanges(source: Project, before: Project, after: Project,
         return unsupported('The targets could not be identified');
     }
     projectAssets(after);
-    if (customContent(after)) return unsupported('Plus extension manifests and custom fonts are not saved to a project folder');
+    if (after.turboWarpPlus !== undefined) return unsupported('Plus extension manifests are not saved to a project folder');
     if (equal(before, after) && equal([...beforeIds], [...afterIds])) return null;
     const {targets: sourceTargets, ...sourceOther} = source;
     const {targets: beforeTargets, ...beforeOther} = before;

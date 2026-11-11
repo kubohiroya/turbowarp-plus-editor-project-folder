@@ -78,7 +78,8 @@ function folder(project, assets, {embedded = {formatVersion: 1, extensions: []},
 
 function editor(initial, assetData) {
     let state = structuredClone(initial);
-    const AssetType = {Sound: {name: 'Sound'}, ImageVector: {name: 'ImageVector'}, ImageBitmap: {name: 'ImageBitmap'}};
+    const AssetType = {Sound: {name: 'Sound'}, ImageVector: {name: 'ImageVector'}, ImageBitmap: {name: 'ImageBitmap'},
+        Font: {name: 'Font'}};
     const runtimeTargets = () => state.targets.map(target => ({
         id: target.runtimeId, isStage: target.isStage, isOriginal: true, getName: () => target.name,
         sprite: {costumes: (target.costumes ?? []).map(entry => ({asset: {assetId: entry.assetId, dataFormat: entry.dataFormat,
@@ -93,6 +94,12 @@ function editor(initial, assetData) {
             getTargetForStage: () => stage, on() {}, off() {}
         },
         on() {}, off() {}, quit() {},
+        get assets() {
+            return (state.customFonts ?? []).filter(font => !font.system).map(font => {
+                const [assetId, dataFormat] = font.md5ext.split('.');
+                return {assetId, dataFormat, data: assetData.get(font.md5ext)};
+            });
+        },
         async loadProject(text) {
             state = JSON.parse(text);
             state.targets.forEach((target, index) => {target.runtimeId = `id${index}`;});
@@ -134,6 +141,49 @@ const initialProject = () => ({targets: [
         costumes: [reference('backdrop', red)], sounds: [], volume: 100, layerOrder: 0, tempo: 60},
     sprite('Cat', [reference('cat', blue)], {folderOnly: 'Cat'})
 ], monitors: [], extensions: [], meta: {semver: '3.0.0'}});
+
+test('saves system, web and file fonts alongside embedded and remote extensions', async t => {
+    const project = initialProject();
+    const first = bytes('first font file'), next = bytes('next font file');
+    const firstName = `${md5(first)}.ttf`, nextName = `${md5(next)}.woff2`;
+    const system = {system: true, family: 'A System Font', fallback: 'Sans Serif'};
+    const web = {system: true, family: 'Roboto Mono', fallback: 'Serif',
+        webFont: {provider: 'google-fonts', id: 'roboto-mono'}};
+    const firstFile = {system: false, family: 'First Font', fallback: 'Sans Serif', md5ext: firstName};
+    const nextFile = {system: false, family: 'Next Font', fallback: 'Serif', md5ext: nextName};
+    project.customFonts = [system, web, firstFile];
+    project.extensions = ['embedded', 'remote'];
+    project.extensionURLs = {embedded: 'embedded-extension:extensions/embedded.js', remote: 'https://example.org/remote.js'};
+    const script = bytes('Scratch.extensions.register({});\n');
+    const embedded = {formatVersion: 1, extensions: [
+        {id: 'embedded', path: 'extensions/embedded.js', mediaType: 'text/javascript', parameters: [], encoding: 'base64'}
+    ]};
+    const disk = folder(project, [[`${md5(red)}.svg`, red], [`${md5(blue)}.svg`, blue], [firstName, first]], {
+        embedded, scripts: [['embedded.js', script]]
+    });
+    const {mounted, edit, editProject, save, snapshot} = editor(project, new Map([[firstName, first], [nextName, next]]));
+    t.after(() => mounted.dispose());
+    assert.equal(await mounted.openDirectory(disk.directory, () => true), 'opened');
+    assert.equal(snapshot().extensionURLs.embedded, `data:text/javascript;base64,${Buffer.from(script).toString('base64')}`);
+
+    edit(targets => {targets[1].name = 'Kitten';});
+    await save();
+    assert.deepEqual(disk.project().customFonts, [system, web, firstFile]);
+    assert.deepEqual(disk.assetFiles.get(firstName).data, first);
+    assert.ok(disk.manifest().archiveEntries.includes(firstName));
+
+    editProject(state => {state.customFonts = [system, web, nextFile];});
+    await save();
+    assert.deepEqual(disk.project().customFonts, [system, web, nextFile]);
+    assert.deepEqual(disk.assetFiles.get(nextName).data, next);
+    assert.ok(disk.manifest().archiveEntries.includes(nextName));
+    assert.ok(!disk.assetFiles.has(firstName));
+    assert.ok(!disk.manifest().archiveEntries.includes(firstName));
+    assert.deepEqual(disk.project().extensionURLs, project.extensionURLs);
+    assert.deepEqual(disk.embedded(), embedded);
+    assert.deepEqual(disk.extensionFiles.get('embedded.js').data, script);
+});
+
 const setup = async t => {
     const disk = folder(initialProject(), [[`${md5(red)}.svg`, red], [`${md5(blue)}.svg`, blue]]);
     const assetData = new Map([[`${md5(red)}.svg`, red], [`${md5(blue)}.svg`, blue], [`${md5(green)}.svg`, green]]);

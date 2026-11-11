@@ -12,6 +12,8 @@ This package opens and saves existing sb3-toolchain v1 project folders in TurboW
 
 The host supplies the VM, menu components, and project state callbacks. The browser must support the File System Access picker for the built-in open command. Save writes block, variable, list, sprite property, monitor and built-in extension edits to the project file, including state that changes while the project runs. Sprites can be added, removed and renamed, and costumes and sounds added or removed: new asset files are written first, then `sb3-source.json` and the project file, and asset files nothing refers to are deleted last. See [Editor issue #305](https://github.com/kubohiroya/turbowarp-plus-editor/issues/305) and [issue #308](https://github.com/kubohiroya/turbowarp-plus-editor/issues/308).
 
+The project file keeps system and web font references. Embedded font files are saved in `assets/`.
+
 Folders can contain embedded extension scripts and custom extension URLs. Opening a folder restores embedded scripts as data URLs and uses the Editor's extension review. Saving preserves unchanged extension files and metadata, and reports when replacing a script removes its recorded source. See [拡張機能](README.ja.md#拡張機能).
 
 ## Folder explorer

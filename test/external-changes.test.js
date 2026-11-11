@@ -297,7 +297,7 @@ test('notes edits the folder cannot save and still shows the folder changes', as
     t.after(() => editor.mounted.dispose());
     await editor.open();
     const toJSON = editor.vm.toJSON;
-    editor.vm.toJSON = (...args) => JSON.stringify({...JSON.parse(toJSON(...args)), customFonts: []});
+    editor.vm.toJSON = (...args) => JSON.stringify({...JSON.parse(toJSON(...args)), turboWarpPlus: {}});
     editor.state.dirty = true;
     editor.disk.writeProject(projectAt({x: 5, y: 5}));
     await editor.scan();
