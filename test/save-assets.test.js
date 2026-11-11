@@ -95,7 +95,7 @@ function editor(initial, assetData) {
         },
         on() {}, off() {}, quit() {},
         get assets() {
-            return (state.customFonts ?? []).filter(font => !font.system).map(font => {
+            return (state.customFonts ?? []).filter(font => !font.system && typeof font.md5ext === 'string').map(font => {
                 const [assetId, dataFormat] = font.md5ext.split('.');
                 return {assetId, dataFormat, data: assetData.get(font.md5ext)};
             });
@@ -151,7 +151,8 @@ test('saves system, web and file fonts alongside embedded and remote extensions'
         webFont: {provider: 'google-fonts', id: 'roboto-mono'}};
     const firstFile = {system: false, family: 'First Font', fallback: 'Sans Serif', md5ext: firstName};
     const nextFile = {system: false, family: 'Next Font', fallback: 'Serif', md5ext: nextName};
-    project.customFonts = [system, web, firstFile];
+    const legacy = {system: false, family: 'Legacy without asset', fallback: 'Serif'};
+    project.customFonts = [system, web, firstFile, legacy];
     project.extensions = ['embedded', 'remote'];
     project.extensionURLs = {embedded: 'embedded-extension:extensions/embedded.js', remote: 'https://example.org/remote.js'};
     const script = bytes('Scratch.extensions.register({});\n');
@@ -168,13 +169,13 @@ test('saves system, web and file fonts alongside embedded and remote extensions'
 
     edit(targets => {targets[1].name = 'Kitten';});
     await save();
-    assert.deepEqual(disk.project().customFonts, [system, web, firstFile]);
+    assert.deepEqual(disk.project().customFonts, [system, web, firstFile, legacy]);
     assert.deepEqual(disk.assetFiles.get(firstName).data, first);
     assert.ok(disk.manifest().archiveEntries.includes(firstName));
 
-    editProject(state => {state.customFonts = [system, web, nextFile];});
+    editProject(state => {state.customFonts = [system, web, nextFile, legacy];});
     await save();
-    assert.deepEqual(disk.project().customFonts, [system, web, nextFile]);
+    assert.deepEqual(disk.project().customFonts, [system, web, nextFile, legacy]);
     assert.deepEqual(disk.assetFiles.get(nextName).data, next);
     assert.ok(disk.manifest().archiveEntries.includes(nextName));
     assert.ok(!disk.assetFiles.has(firstName));

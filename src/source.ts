@@ -431,7 +431,7 @@ export const projectAssets = (project: Project) => {
     const fonts = project.customFonts ?? [];
     if (!Array.isArray(fonts)) return unsupported('Invalid customFonts list');
     for (const font of fonts) {
-        if (!isObject(font) || font.system !== false) continue;
+        if (!isObject(font) || font.system !== false || font.md5ext === undefined) continue;
         if (typeof font.md5ext !== 'string' || !/^[a-f0-9]{32}\.(ttf|otf|woff2?)$/u.test(font.md5ext)) {
             return unsupported('Invalid font asset reference');
         }
