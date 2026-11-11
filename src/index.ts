@@ -243,6 +243,11 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
     return {
         openDirectory: (...args: Parameters<typeof session.openDirectory>) =>
             session.openDirectory(...args).finally(renderReload),
+        /**
+         * The folder the loaded project came from, or `null` once another project loaded or the folder was
+         * detached. A host can tell projects apart by it, for example to keep the layout of each one.
+         */
+        get directory() {return session.directory;},
         dispose() {
             menus.delete(vm);
             session.dispose();
