@@ -1,9 +1,12 @@
 import {FolderError} from './source.js';
 import {createFolderSession} from './session.js';
+import {registerFolder} from './folder-registry.js';
 import type {FolderHost, FolderVM, PickerWindow} from './session.js';
 
 export type {Comparison, ComparisonRequest, ComparisonSection, FolderHost, FolderVM, OpenResult} from './session.js';
 export type {ReloadTarget} from './block-reload.js';
+export {followProjectFolder} from './folder-registry.js';
+export type {FollowedFolder} from './folder-registry.js';
 export type {DeserializeBlocks} from './script-reload.js';
 
 const messages = {
@@ -221,7 +224,7 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
             notice.remove();
         };
     }
-    menus.set(vm, {
+    const menu: MenuEntry = {
         session,
         open(locale) {
             const message = messageFor(locale);
@@ -239,6 +242,12 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
                 renderReload();
             }
         }
+    };
+    menus.set(vm, menu);
+    const unregister = registerFolder(vm, {
+        get directory() {return session.directory;},
+        subscribe: listener => session.subscribe(listener),
+        open: locale => menu.open(locale)
     });
     return {
         openDirectory: (...args: Parameters<typeof session.openDirectory>) =>
@@ -250,6 +259,7 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
         get directory() {return session.directory;},
         dispose() {
             menus.delete(vm);
+            unregister();
             session.dispose();
             stopWatching?.();
             view.clearTimeout(timer);
