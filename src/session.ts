@@ -1,5 +1,5 @@
-import {assetKey, assetTypeFor, assertFolderUnchanged, fileVersion, FolderError, manifestFile, parseProject, projectAssets, projectChanges,
-    projectFile, readFolder, readFolderUpdate, unsupported} from './source.js';
+import {assetKey, assetTypeFor, assertFolderUnchanged, extensionsFile, fileVersion, FolderError, manifestFile, parseProject,
+    planExtensionSave, projectAssets, projectChanges, projectFile, readFolder, readFolderUpdate, sameBytes, unsupported} from './source.js';
 import type {Asset, FolderSource, FolderUpdate, JsonObject, Project, Storage} from './source.js';
 import {applyBlockReload, planBlockReload} from './block-reload.js';
 import type {ReloadTarget} from './block-reload.js';
@@ -17,7 +17,7 @@ export interface FolderVM {
     on(event: 'PROJECT_CHANGED', listener: () => void): void;
     off(event: 'PROJECT_CHANGED', listener: () => void): void;
     quit(): void;
-    loadProject(project: string): Promise<unknown>;
+    loadProject(project: string, options?: {replaceLegacyExtensions: boolean}): Promise<unknown>;
     toJSON(target?: string, options?: {allowOptimization: boolean}): string;
     renderer?: {draw(): void};
 }
@@ -83,7 +83,8 @@ export type ReloadState = 'ready' | 'full' | 'waiting' | 'dirty' | 'running' | '
 /** What the reload command does for the pending change, regardless of whether it may run now. */
 export type ReloadKind = 'partial' | 'full' | null;
 export type OpenResult = 'opened' | 'cancelled';
-export type SaveResult = 'saved' | 'unchanged';
+type SaveResult = {status: 'saved' | 'unchanged'; sourceRemoved: string[]};
+type SaveDirectory = {directory: FileSystemDirectoryHandle; files: Map<string, Uint8Array>; prefix: string};
 
 type VMAsset = {assetId: string; dataFormat: string; data?: Uint8Array};
 
@@ -112,7 +113,7 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
         return session.ids && after ? {before: session.ids, after} : undefined;
     };
     // Writes a whole file and, for a file the folder already had, checks the folder before the write takes effect.
-    // A new asset file is empty until then, so it is checked by the writes that follow it instead.
+    // A new file is empty until then, so it is checked by the writes that follow it instead.
     const writeChecked = async (session: Session, handle: FileSystemFileHandle, data: Uint8Array, existing: boolean) => {
         const options = (existing ? {mode: 'exclusive'} : {}) as FileSystemCreateWritableOptions;
         const writable = await handle.createWritable(options);
@@ -125,11 +126,6 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
             await writable.abort().catch(() => {});
             throw error;
         }
-    };
-    const rewrite = async (directory: FileSystemDirectoryHandle, name: string, data: Uint8Array) => {
-        const writable = await (await directory.getFileHandle(name)).createWritable();
-        await writable.write(data as Uint8Array<ArrayBuffer>);
-        await writable.close();
     };
     // The bytes of an asset the Editor holds, such as a costume added since the folder was opened.
     const assetData = (name: string) => {
@@ -178,7 +174,7 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
             let stage: object | null;
             try {
                 vm.quit();
-                await vm.loadProject(source.projectText);
+                await vm.loadProject(source.loadText, {replaceLegacyExtensions: true});
                 stage = vm.runtime.getTargetForStage();
             } finally {
                 if (reader.assets === assets) reader.assets = null;
@@ -265,7 +261,7 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
             try {
                 const edited = snapshot();
                 const result = projectChanges(session.source.project, session.baseline, edited, identity(session, edited));
-                editor = result ? `${JSON.stringify(result, null, 2)}\n` : base;
+                editor = result ? `${JSON.stringify(planExtensionSave(session.source, result).project, null, 2)}\n` : base;
             } catch (error) {
                 if (!(error instanceof FolderError)) throw error;
                 editor = null;
@@ -361,14 +357,9 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
                 const result = projectChanges(session.source.project, session.baseline, edited, identity(session, edited));
                 await assertFolderUnchanged(session.source);
                 active(session);
-                if (!result) {
-                    if (revision === saveRevision) host.onSaved();
-                    return 'unchanged';
-                }
                 const {source} = session;
-                // New asset files first, then the manifest and the project file, then the files nothing refers to.
-                // A failure part way leaves every file the manifest and the project file refer to in the folder.
-                const needed = projectAssets(result);
+                const extensionSave = planExtensionSave(source, result ?? source.project);
+                const needed = projectAssets(extensionSave.project);
                 const added = new Map<string, Uint8Array>();
                 for (const [name, kind] of needed) {
                     if (source.bytes.has(name)) continue;
@@ -380,6 +371,10 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
                     added.set(name, data);
                 }
                 const removed = [...source.bytes.keys()].filter(name => !needed.has(name));
+                if (!result && !removed.length && !extensionSave.removed.length) {
+                    if (revision === saveRevision) host.onSaved();
+                    return {status: 'unchanged', sourceRemoved: []};
+                }
                 const encoder = new TextEncoder();
                 let manifest: Uint8Array | null = null;
                 if (added.size || removed.length) {
@@ -388,58 +383,90 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
                     value.archiveEntries = [...entries, ...added.keys()];
                     manifest = encoder.encode(`${JSON.stringify(value, null, 2)}\n`);
                 }
-                const assets = await source.directory.getDirectoryHandle('assets');
-                const written: string[] = [];
-                const previousManifest = source.files.get(manifestFile)!;
-                let manifestWritten = false;
-                const text = `${JSON.stringify(result, null, 2)}\n`;
+                const root = {directory: source.directory, files: source.files, prefix: ''};
+                const assets = {directory: await source.directory.getDirectoryHandle('assets'), files: source.bytes, prefix: 'assets/'};
+                const extensions = {directory: await source.directory.getDirectoryHandle('extensions'),
+                    files: source.extensionBytes, prefix: 'extensions/'};
+                const undo: (() => Promise<void>)[] = [];
+                const write = async ({directory, files, prefix}: SaveDirectory, name: string, data: Uint8Array) => {
+                    const previous = files.get(name);
+                    if (!previous) {
+                        const existing = await directory.getFileHandle(name).catch(error => {
+                            if (error instanceof DOMException && error.name === 'NotFoundError') return null;
+                            throw error;
+                        });
+                        if (existing) throw new FolderError('conflict');
+                    }
+                    const handle = await directory.getFileHandle(name, previous ? undefined : {create: true});
+                    const key = prefix + name;
+                    const previousVersion = source.versions.get(key);
+                    let committed = false;
+                    undo.push(async () => {
+                        let version = previousVersion;
+                        try {
+                            if (!committed && previous) return;
+                            const bytes = new Uint8Array(await (await handle.getFile()).arrayBuffer());
+                            if (!sameBytes(bytes, committed ? data : new Uint8Array())) return;
+                            if (previous) {
+                                const writable = await handle.createWritable();
+                                try {
+                                    await writable.write(previous as Uint8Array<ArrayBuffer>);
+                                    await writable.close();
+                                } catch (error) {
+                                    await writable.abort().catch(() => {});
+                                    throw error;
+                                }
+                                version = fileVersion(await handle.getFile());
+                            } else {
+                                await directory.removeEntry(name);
+                            }
+                        } finally {
+                            // If restoration failed, keep the old expectations so the next save reports a conflict.
+                            if (previous) files.set(name, previous);
+                            else files.delete(name);
+                            if (version === undefined) source.versions.delete(key);
+                            else source.versions.set(key, version);
+                        }
+                    });
+                    await writeChecked(session, handle, data, previous !== undefined);
+                    committed = true;
+                    files.set(name, data);
+                    source.versions.set(key, fileVersion(await handle.getFile()));
+                };
+                // Write the files that will be referenced before publishing the new manifests and project.
                 try {
-                    for (const [name, data] of added) {
-                        const handle = await assets.getFileHandle(name, {create: true});
-                        written.push(name);
-                        await writeChecked(session, handle, data, false);
-                        source.bytes.set(name, data);
-                        source.versions.set(`assets/${name}`, fileVersion(await handle.getFile()));
+                    for (const [name, data] of added) await write(assets, name, data);
+                    for (const [name, data] of extensionSave.writes) await write(extensions, name, data);
+                    if (manifest) await write(root, manifestFile, manifest);
+                    if (extensionSave.manifestChanged) {
+                        await write(root, extensionsFile, encoder.encode(`${JSON.stringify(extensionSave.embedded, null, 2)}\n`));
                     }
-                    if (manifest) {
-                        const handle = await source.directory.getFileHandle(manifestFile);
-                        await writeChecked(session, handle, manifest, true);
-                        manifestWritten = true;
-                        source.files.set(manifestFile, manifest);
-                        source.versions.set(manifestFile, fileVersion(await handle.getFile()));
-                    }
-                    await writeChecked(session, await source.directory.getFileHandle(projectFile), encoder.encode(text), true);
+                    if (result) await write(root, projectFile, encoder.encode(`${JSON.stringify(extensionSave.project, null, 2)}\n`));
                 } catch (error) {
-                    // Put the folder back as it was, as far as it can be. The checks above keep other tools' files.
-                    if (manifestWritten) {
-                        await rewrite(source.directory, manifestFile, previousManifest).catch(() => {});
-                        source.files.set(manifestFile, previousManifest);
-                        source.versions.delete(manifestFile);
-                    }
-                    for (const name of written) {
-                        await assets.removeEntry(name).catch(() => {});
-                        source.bytes.delete(name);
-                        source.versions.delete(`assets/${name}`);
-                    }
+                    for (const restore of undo.reverse()) await restore().catch(() => {});
                     throw error;
                 }
-                source.project = result;
-                source.files.set(projectFile, encoder.encode(text));
-                source.versions.delete(projectFile);
-                for (const name of removed) {
-                    try {
-                        await assets.removeEntry(name);
-                        source.bytes.delete(name);
-                        source.versions.delete(`assets/${name}`);
-                    } catch {
-                        // The file stays; nothing refers to it, and the next save tries again.
+                source.project = extensionSave.project;
+                source.embedded = extensionSave.embedded;
+                for (const [{directory, files, prefix}, names] of [[assets, removed], [extensions, extensionSave.removed]] as const) {
+                    for (const name of names) {
+                        try {
+                            const file = await (await directory.getFileHandle(name)).getFile();
+                            if (!sameBytes(new Uint8Array(await file.arrayBuffer()), files.get(name)!)) continue;
+                            await directory.removeEntry(name);
+                        } catch (error) {
+                            // The next save retries cleanup.
+                            if (!(error instanceof DOMException && error.name === 'NotFoundError')) continue;
+                        }
+                        files.delete(name);
+                        source.versions.delete(prefix + name);
                     }
                 }
                 session.baseline = edited;
                 session.ids = ids;
                 session.pending = null;
                 if (current === session && revision === saveRevision) host.onSaved();
-                return 'saved';
+                return {status: 'saved', sourceRemoved: extensionSave.sourceRemoved};
             } finally {
                 busy = false;
             }

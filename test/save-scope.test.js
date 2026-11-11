@@ -90,7 +90,7 @@ test('matches sprites by runtime id: a rename keeps the folder entry, and sprite
     assert.equal(plain(projectChanges(folderProject(), before, renamed)).targets[1].folderOnly, undefined);
 });
 
-test('accepts new and removed costumes, and refuses unsupported assets and custom extensions', () => {
+test('accepts new and removed costumes, and refuses unsupported assets and custom fonts', () => {
     const before = editorProject();
     const newCostume = clone(before);
     newCostume.targets[1].costumes.push(costume('c'.repeat(32), 'cat2'));
@@ -102,7 +102,7 @@ test('accepts new and removed costumes, and refuses unsupported assets and custo
     unsupportedFormat.targets[1].sounds.push({name: 'clip', assetId: 'd'.repeat(32), dataFormat: 'ogg', md5ext: `${'d'.repeat(32)}.ogg`});
     assert.throws(() => projectChanges(folderProject(), before, unsupportedFormat), scope);
     const custom = clone(before);
-    custom.extensionURLs = {custom: 'https://example.invalid/custom.js'};
+    custom.customFonts = [];
     assert.throws(() => projectChanges(folderProject(), before, custom), scope);
 });
 
@@ -114,4 +114,14 @@ test('replaces a changed list whole when its items are not the same items in the
     const after = clone(before);
     after.monitors[0].value = 5;
     assert.deepEqual(plain(projectChanges(source, before, after)).monitors, after.monitors);
+});
+
+test('preserves URLs that the VM omitted when a serialized extension is added or removed', () => {
+    const source = folderProject();
+    source.extensionURLs = {unused: 'https://example.invalid/unused.js'};
+    const before = editorProject();
+    const after = {...before, extensionURLs: {added: 'https://example.invalid/added.js'}};
+    const added = projectChanges(source, before, after);
+    assert.deepEqual(plain(added).extensionURLs, {...source.extensionURLs, ...after.extensionURLs});
+    assert.deepEqual(plain(projectChanges(added, after, before)).extensionURLs, source.extensionURLs);
 });

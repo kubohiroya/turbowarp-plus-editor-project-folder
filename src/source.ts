@@ -5,7 +5,8 @@ type Target = JsonObject & {isStage: boolean; name: string};
 
 export const projectFile = 'project.source.json';
 export const manifestFile = 'sb3-source.json';
-const extensionsFile = 'embedded-extensions.json';
+export const extensionsFile = 'embedded-extensions.json';
+const embeddedReference = 'embedded-extension:';
 
 export class FolderError extends Error {
     code: 'conflict' | 'unsupported';
@@ -57,8 +58,14 @@ type FolderFiles = {
     files: Map<string, Uint8Array>;
     directory: FileSystemDirectoryHandle;
     bytes: Map<string, Uint8Array>;
+    extensionBytes: Map<string, Uint8Array>;
 };
-export type FolderSource = FolderFiles & {project: Project; projectText: string; storageAssets: Map<string, Asset>};
+export type FolderSource = FolderFiles & {
+    project: Project;
+    loadText: string;
+    storageAssets: Map<string, Asset>;
+    embedded: ExtensionManifest;
+};
 
 const getFile = async (dir: FileSystemDirectoryHandle, name: string) => (await dir.getFileHandle(name)).getFile();
 export const fileVersion = (file: File) => `${file.size}:${file.lastModified}`;
@@ -82,6 +89,177 @@ export const assetTypeFor = (storage: Storage, kind: 'costumes' | 'sounds', form
     storage.AssetType.Sound : format === 'svg' ? storage.AssetType.ImageVector : storage.AssetType.ImageBitmap;
 export const assetKey = (type: AssetType, id: string, format: string) => `${type.name}/${id}.${format}`;
 
+type DataUrlMetadata = {mediaType: string; parameters: string[]; encoding: 'base64' | 'percent'};
+type EmbeddedExtension = JsonObject & DataUrlMetadata & {id: string; path: string};
+type ExtensionBundle = JsonObject & {id: string; members: string[]};
+type ExtensionManifest = JsonObject & {extensions: EmbeddedExtension[]; extensionBundles?: ExtensionBundle[]};
+
+const extensionPath = (id: string) => {
+    if (!/^[A-Za-z0-9._-]+$/u.test(id)) return unsupported(`Embedded extension ID cannot be used as a filename: ${id}`);
+    return `extensions/${id}.js`;
+};
+const validUrlPart = (part: Json | undefined): part is string => typeof part === 'string' && part.length > 0 && !/[;,\r\n]/u.test(part);
+const extensionURLs = (project: Project) => {
+    const urls = project.extensionURLs === undefined ? {} : project.extensionURLs;
+    if (!isObject(urls) || Object.values(urls).some(url => typeof url !== 'string')) return unsupported('Invalid extensionURLs');
+    return urls as Record<string, string>;
+};
+const apiManifestName = (entry: EmbeddedExtension): string | undefined => {
+    if (entry.source === undefined) return;
+    if (!isObject(entry.source)) return unsupported(`Invalid source for embedded extension: ${entry.id}`);
+    const api = entry.source.apiManifest;
+    if (api === undefined) return;
+    const name = `${entry.id}.manifest.json`;
+    if (!isObject(api) || api.path !== `extensions/${name}`) return unsupported(`Invalid API manifest path: ${entry.id}`);
+    return name;
+};
+const extensionNames = (entries: EmbeddedExtension[]) => entries.flatMap(entry => {
+    const script = `${entry.id}.js`;
+    const api = apiManifestName(entry);
+    return api === undefined ? [script] : [script, api];
+});
+
+function validateExtensions(project: Project, value: JsonObject): ExtensionManifest {
+    if (value.formatVersion !== 1 || !Array.isArray(value.extensions)) return unsupported('Invalid embedded extension manifest');
+    const urls = extensionURLs(project);
+    const ids = new Set<string>();
+    for (const entry of value.extensions) {
+        if (!isObject(entry) || typeof entry.id !== 'string' || ids.has(entry.id) ||
+            entry.path !== extensionPath(entry.id) || !validUrlPart(entry.mediaType) ||
+            !Array.isArray(entry.parameters) || !entry.parameters.every(validUrlPart) ||
+            (entry.encoding !== 'base64' && entry.encoding !== 'percent') ||
+            !Object.hasOwn(urls, entry.id) || urls[entry.id] !== embeddedReference + entry.path) {
+            return unsupported('Invalid embedded extension entry or project reference');
+        }
+        ids.add(entry.id);
+    }
+    for (const [id, url] of Object.entries(urls)) {
+        if (url.startsWith('data:') || (url.startsWith(embeddedReference) && !ids.has(id))) {
+            return unsupported(`Invalid embedded extension reference: ${id}`);
+        }
+    }
+    if (value.extensionBundles !== undefined) {
+        if (!Array.isArray(value.extensionBundles)) return unsupported('Invalid extensionBundles');
+        const bundleIds = new Set<string>();
+        const members = new Set<string>();
+        for (const bundle of value.extensionBundles) {
+            if (!isObject(bundle) || typeof bundle.id !== 'string' || !/^[a-z0-9]+$/u.test(bundle.id) ||
+                ids.has(bundle.id) || bundleIds.has(bundle.id) || typeof bundle.name !== 'string' ||
+                !bundle.name.trim() || /[\r\n]/u.test(bundle.name) ||
+                !Array.isArray(bundle.members) || bundle.members.length < 2) {
+                return unsupported('Invalid extension bundle');
+            }
+            bundleIds.add(bundle.id);
+            for (const member of bundle.members) {
+                if (typeof member !== 'string' || !/^[a-z0-9]+$/u.test(member) || !ids.has(member) || members.has(member)) {
+                    return unsupported(`Invalid member of extension bundle: ${bundle.id}`);
+                }
+                members.add(member);
+            }
+        }
+    }
+    return value as ExtensionManifest;
+}
+
+function encodeDataUrl(entry: EmbeddedExtension, bytes: Uint8Array): string {
+    const metadata = [entry.mediaType, ...entry.parameters].join(';');
+    if (entry.encoding === 'percent') {
+        const payload = Array.from(bytes, byte => `%${byte.toString(16).padStart(2, '0').toUpperCase()}`).join('');
+        return `data:${metadata},${payload}`;
+    }
+    let binary = '';
+    for (let offset = 0; offset < bytes.length; offset += 8192) {
+        binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
+    }
+    return `data:${metadata};base64,${btoa(binary)}`;
+}
+
+function decodeDataUrl(id: string, url: string): {metadata: DataUrlMetadata; bytes: Uint8Array} {
+    const comma = url.indexOf(',');
+    if (comma === -1) return unsupported(`Invalid data URL for embedded extension: ${id}`);
+    const [type, ...parameters] = url.slice('data:'.length, comma).split(';');
+    const mediaType = type || 'text/plain';
+    const base64 = parameters.indexOf('base64');
+    if (base64 !== -1) parameters.splice(base64, 1);
+    const encoding = base64 === -1 ? 'percent' : 'base64';
+    if (!validUrlPart(mediaType) || !parameters.every(validUrlPart) || parameters.includes('base64')) {
+        return unsupported(`Invalid data URL metadata for embedded extension: ${id}`);
+    }
+    const payload = url.slice(comma + 1);
+    try {
+        if (encoding === 'percent') {
+            return {metadata: {mediaType, parameters, encoding}, bytes: new TextEncoder().encode(decodeURIComponent(payload))};
+        }
+        if (!/^[A-Za-z0-9+/]*={0,2}$/u.test(payload)) throw new Error('Invalid base64');
+        const binary = atob(payload.replace(/=+$/u, ''));
+        return {metadata: {mediaType, parameters, encoding}, bytes: Uint8Array.from(binary, char => char.charCodeAt(0))};
+    } catch {
+        return unsupported(`Invalid data URL payload for embedded extension: ${id}`);
+    }
+}
+
+function hasSandboxedNoticeRequirement(bundle: ExtensionBundle, entry: EmbeddedExtension, bytes: Uint8Array): boolean {
+    let requirement;
+    if (bundle.buildMode === 'module') {
+        const source = entry.source;
+        if (isObject(source) && isObject(source.module)) requirement = source.module.unsandboxed;
+    } else {
+        const script = new TextDecoder().decode(bytes);
+        requirement = /^\/\/ Unsandboxed: (.+)\r?$/mu.exec(script)?.[1].trim();
+    }
+    return requirement === 'required' || requirement === 'optional';
+}
+
+export function planExtensionSave(source: FolderSource, project: Project) {
+    const urls = {...extensionURLs(project)};
+    const entries = new Map(source.embedded.extensions.map(entry => [entry.id, entry]));
+    const writes = new Map<string, Uint8Array>();
+    const sourceRemoved: string[] = [];
+    for (const [id, entry] of entries) {
+        if (!Object.hasOwn(urls, id) || (!urls[id].startsWith('data:') && urls[id] !== embeddedReference + entry.path)) entries.delete(id);
+    }
+    for (const [id, url] of Object.entries(urls)) {
+        if (!url.startsWith('data:')) continue;
+        const path = extensionPath(id);
+        const {metadata, bytes} = decodeDataUrl(id, url);
+        const name = `${id}.js`;
+        const previous = entries.get(id);
+        urls[id] = embeddedReference + path;
+        if (!previous || !sameBytes(source.extensionBytes.get(name)!, bytes)) {
+            const entry: EmbeddedExtension = {...previous, id, path, ...metadata};
+            if (entry.source !== undefined) {
+                delete entry.source;
+                sourceRemoved.push(id);
+            }
+            entries.set(id, entry);
+            writes.set(name, bytes);
+        }
+    }
+    const embedded: ExtensionManifest = {...source.embedded, extensions: [...entries.values()]};
+    if (embedded.extensionBundles) {
+        embedded.extensionBundles = embedded.extensionBundles.flatMap(bundle => {
+            const members = bundle.members.filter(id => entries.has(id) &&
+                // Module bundles need a managed npm module for each member.
+                !(bundle.buildMode === 'module' && sourceRemoved.includes(id)));
+            if (members.length < 2) return [];
+            const updated: ExtensionBundle = {...bundle, members};
+            const changed = members.length !== bundle.members.length || members.some(id => writes.has(`${id}.js`));
+            if (updated.sandboxedNotice !== undefined && changed && !members.some(id => {
+                const name = `${id}.js`;
+                return hasSandboxedNoticeRequirement(updated, entries.get(id)!, writes.get(name) ?? source.extensionBytes.get(name)!);
+            })) {
+                delete updated.sandboxedNotice;
+            }
+            return [updated];
+        });
+    }
+    const result = project.extensionURLs === undefined ? project : {...project, extensionURLs: urls};
+    validateExtensions(result, embedded);
+    const names = new Set(extensionNames(embedded.extensions));
+    return {project: result, embedded, manifestChanged: !equal(embedded, source.embedded), writes, sourceRemoved,
+        removed: [...source.extensionBytes.keys()].filter(name => !names.has(name))};
+}
+
 export async function readFolder(directory: FileSystemDirectoryHandle, storage: Storage): Promise<FolderSource> {
     const versions = new Map<string, string>();
     const readEntry = async (dir: FileSystemDirectoryHandle, name: string, prefix = '') => {
@@ -100,12 +278,8 @@ export async function readFolder(directory: FileSystemDirectoryHandle, storage: 
         manifest.assetsDirectory !== 'assets' || !Array.isArray(manifest.archiveEntries)) {
         return unsupported('Expected an sb3-toolchain v1 folder');
     }
-    if (embedded.formatVersion !== 1 || !Array.isArray(embedded.extensions) || embedded.extensions.length ||
-        (embedded.extensionBundles !== undefined && (!Array.isArray(embedded.extensionBundles) || embedded.extensionBundles.length)) ||
-        project.turboWarpPlus !== undefined || project.customFonts !== undefined ||
-        (project.extensionURLs !== undefined && (!isObject(project.extensionURLs) || Object.keys(project.extensionURLs).length))) {
-        return unsupported('Custom extensions and fonts are not supported in project folders');
-    }
+    if (customContent(project)) return unsupported('Plus extension manifests and custom fonts are not supported in project folders');
+    const extensionManifest = validateExtensions(project, embedded);
     const expected = new Set(['project.json']);
     const references = new Map<string, {id: string; format: string; type: AssetType; name: string}>();
     for (const target of project.targets) {
@@ -132,20 +306,27 @@ export async function readFolder(directory: FileSystemDirectoryHandle, storage: 
     }
     expected.delete('project.json');
     const [assets, extensions] = await Promise.all([directory.getDirectoryHandle('assets'), directory.getDirectoryHandle('extensions')]);
-    if (!sameNames(await readNames(assets), expected) || (await readNames(extensions)).size) {
+    const scripts = extensionNames(extensionManifest.extensions);
+    if (!sameNames(await readNames(assets), expected) || !sameNames(await readNames(extensions), scripts)) {
         return unsupported('Unexpected or missing source files');
     }
     const bytes = new Map(await Promise.all([...expected].map(name => readEntry(assets, name, 'assets/'))));
+    const extensionBytes = new Map(await Promise.all(scripts.map(name => readEntry(extensions, name, 'extensions/'))));
+    const loadText = extensionManifest.extensions.length ? JSON.stringify({...project, extensionURLs: {
+        ...extensionURLs(project),
+        ...Object.fromEntries(extensionManifest.extensions.map(entry =>
+            [entry.id, encodeDataUrl(entry, extensionBytes.get(`${entry.id}.js`)!)]))
+    }}) : projectText;
     const storageAssets = new Map<string, Asset>();
     for (const [key, {id, format, type, name}] of references) {
         const asset = storage.createAsset(type, format, bytes.get(name)!.slice(), null, true);
         if (asset.assetId !== id) return unsupported(`Asset hash mismatch: ${name}`);
         storageAssets.set(key, asset);
     }
-    return {versions, files, directory, bytes, project, projectText, storageAssets};
+    return {versions, files, directory, bytes, extensionBytes, project, loadText, storageAssets, embedded: extensionManifest};
 }
 
-const sameBytes = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((value, index) => value === b[index]);
+export const sameBytes = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((value, index) => value === b[index]);
 
 export type FolderUpdate = {version: string; bytes: Uint8Array; project: Project};
 export type DiskChange = FolderUpdate | 'structure' | 'waiting' | null;
@@ -159,10 +340,11 @@ export async function readFolderUpdate(source: FolderSource, previous: FolderUpd
             directory.getDirectoryHandle('assets'), directory.getDirectoryHandle('extensions'), getFile(directory, projectFile)
         ]);
         const [assetNames, extensionNames] = await Promise.all([readNames(assets), readNames(extensions)]);
-        if (!sameNames(assetNames, source.bytes.keys()) || extensionNames.size) return 'structure';
+        if (!sameNames(assetNames, source.bytes.keys()) || !sameNames(extensionNames, source.extensionBytes.keys())) return 'structure';
         const unchanged = await Promise.all([
             ...[manifestFile, extensionsFile].map(async name => fileVersion(await getFile(directory, name)) === versions.get(name)),
-            ...[...assetNames].map(async name => fileVersion(await getFile(assets, name)) === versions.get(`assets/${name}`))
+            ...[...assetNames].map(async name => fileVersion(await getFile(assets, name)) === versions.get(`assets/${name}`)),
+            ...[...extensionNames].map(async name => fileVersion(await getFile(extensions, name)) === versions.get(`extensions/${name}`))
         ]);
         if (unchanged.includes(false)) return 'structure';
         const version = fileVersion(project);
@@ -174,7 +356,9 @@ export async function readFolderUpdate(source: FolderSource, previous: FolderUpd
             versions.set(projectFile, version);
             return null;
         }
-        return {version, bytes, project: parseProject(new TextDecoder('utf-8', {fatal: true}).decode(bytes))};
+        const updated = parseProject(new TextDecoder('utf-8', {fatal: true}).decode(bytes));
+        if (!equal(source.project.extensionURLs, updated.extensionURLs)) return 'structure';
+        return {version, bytes, project: updated};
     } catch (error) {
         // Well-formed JSON outside the partial scope needs a whole reload. Anything else may be a write in
         // progress, such as truncated JSON or a file replaced between the probe and the read, and is retried.
@@ -186,12 +370,12 @@ export async function assertFolderUnchanged(source: FolderSource) {
     try {
         const assets = await source.directory.getDirectoryHandle('assets');
         const extensions = await source.directory.getDirectoryHandle('extensions');
-        if (!sameNames(await readNames(assets), source.bytes.keys()) || (await readNames(extensions)).size) throw new FolderError('conflict');
-        for (const [name, bytes] of source.files) {
-            if (!sameBytes(await readBytes(source.directory, name), bytes)) throw new FolderError('conflict');
-        }
-        for (const [name, bytes] of source.bytes) {
-            if (!sameBytes(await readBytes(assets, name), bytes)) throw new FolderError('conflict');
+        if (!sameNames(await readNames(assets), source.bytes.keys()) ||
+            !sameNames(await readNames(extensions), source.extensionBytes.keys())) throw new FolderError('conflict');
+        for (const [directory, files] of [[source.directory, source.files], [assets, source.bytes], [extensions, source.extensionBytes]] as const) {
+            for (const [name, bytes] of files) {
+                if (!sameBytes(await readBytes(directory, name), bytes)) throw new FolderError('conflict');
+            }
         }
     } catch (error) {
         if (error instanceof FolderError || (error instanceof DOMException && ['NotFoundError', 'TypeMismatchError'].includes(error.name))) {
@@ -258,8 +442,7 @@ export const projectAssets = (project: Project) => {
     }
     return names;
 };
-const customContent = (project: Project) => project.turboWarpPlus !== undefined || project.customFonts !== undefined ||
-    (project.extensionURLs !== undefined && (!isObject(project.extensionURLs) || Object.keys(project.extensionURLs).length > 0));
+const customContent = (project: Project) => project.turboWarpPlus !== undefined || project.customFonts !== undefined;
 
 /** Runtime ids of the targets, in the order of the project's `targets`, so a renamed sprite stays the same sprite. */
 export type TargetIdentity = {before: readonly string[]; after: readonly string[]};
@@ -277,7 +460,7 @@ export function projectChanges(source: Project, before: Project, after: Project,
         return unsupported('The targets could not be identified');
     }
     projectAssets(after);
-    if (customContent(after)) return unsupported('Custom extensions and fonts are not saved to a project folder');
+    if (customContent(after)) return unsupported('Plus extension manifests and custom fonts are not saved to a project folder');
     if (equal(before, after) && equal([...beforeIds], [...afterIds])) return null;
     const {targets: sourceTargets, ...sourceOther} = source;
     const {targets: beforeTargets, ...beforeOther} = before;
@@ -299,6 +482,12 @@ export function projectChanges(source: Project, before: Project, after: Project,
         ordered = targets.map((target, index) => ({target, at: place(index)})).sort((a, b) => a.at - b.at).map(entry => entry.target);
     }
     const other = applyChanges(sourceOther, beforeOther, afterOther) as JsonObject;
+    if (!equal(before.extensionURLs, after.extensionURLs)) {
+        // The VM only serializes the URLs it knows. Apply its edits to those entries.
+        const urls = applyChanges(source.extensionURLs, extensionURLs(before), extensionURLs(after)) as JsonObject;
+        if (after.extensionURLs === undefined && !Object.keys(urls).length) delete other.extensionURLs;
+        else other.extensionURLs = urls;
+    }
     // Keep the folder's key order, with the targets where they were.
     const result: JsonObject = {};
     for (const key of Object.keys(source)) {

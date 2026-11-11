@@ -10,7 +10,15 @@ TurboWarp Plus Editor で既存の sb3-toolchain v1 の作品フォルダを開�
 - `renderProjectFolderMenu(createElement, props)` は既存の開く・保存コマンドをホストのファイルメニューに渡します。
 - 接続後の `openDirectory(handle, confirmReplace)` には、ホストが選択済みのディレクトリハンドルを渡せます。ファイルメニューと同じ作品検証・未保存編集の確認を経て開き、保存先にはその作品フォルダを使います。
 
-ホストは VM、メニューコンポーネント、作品状態を扱うコールバックを渡します。メニューからフォルダを開くには、ブラウザーが File System Access のフォルダ選択に対応している必要があります。ブロック、変数・リスト、スプライトの位置や大きさなどの項目、モニター、組み込みの拡張機能の編集を作品データ（`project.source.json`）に保存し、作品の実行で変わった状態も含みます。スプライトの追加・削除・名前の変更と、コスチューム・音の追加・削除も保存します。新しいアセットのファイルを先に書き、`sb3-source.json` と作品データを書いてから、参照されなくなったアセットのファイルを消します。カスタム拡張機能・埋め込み拡張・フォントを含む作品は開けません。 [Editor #305](https://github.com/kubohiroya/turbowarp-plus-editor/issues/305) · [Editor #308](https://github.com/kubohiroya/turbowarp-plus-editor/issues/308)
+ホストは VM、メニューコンポーネント、作品状態を扱うコールバックを渡します。メニューからフォルダを開くには、ブラウザーが File System Access のフォルダ選択に対応している必要があります。ブロック、変数・リスト、スプライトの位置や大きさなどの項目、モニター、組み込みの拡張機能の編集を作品データ（`project.source.json`）に保存し、作品の実行で変わった状態も含みます。スプライトの追加・削除・名前の変更と、コスチューム・音の追加・削除も保存します。新しいアセットのファイルを先に書き、`sb3-source.json` と作品データを書いてから、参照されなくなったアセットのファイルを消します。 [Editor #305](https://github.com/kubohiroya/turbowarp-plus-editor/issues/305) · [Editor #308](https://github.com/kubohiroya/turbowarp-plus-editor/issues/308)
+
+## 拡張機能
+
+埋め込み拡張の参照は、フォルダを開く際に `extensions/<id>.js` の内容とマニフェストから data URL に復元します。URL で指定されたカスタム拡張も、Editor の既存の許可画面を経て読み込みます。 `turboWarpPlus` のマニフェストとカスタムフォントを含む作品フォルダは対象外です。 [Editor #496](https://github.com/kubohiroya/turbowarp-plus-editor/issues/496) · [Editor #495](https://github.com/kubohiroya/turbowarp-plus-editor/issues/495)
+
+保存時は変更のあったスクリプト、拡張のマニフェスト、作品データの順に書き、参照がなくなったファイルを最後に削除します。変更のないスクリプトと拡張のマニフェストはバイト列を保ちます。差し替えで `source` と対応する API マニフェストを外した場合は、保存時に該当する ID を通知します。2 件未満になったバンドル設定は削除します。module バンドルは管理対象の npm モジュールを必要とするため、差し替えで `source` を失った拡張も設定から外れます。
+
+切り戻す場合は、Editor の依存を project-folder 0.6.0 と security-dialog 0.8.8 に戻して再ビルドします。保存済みのフォルダは `sb3-toolchain build` で SB3 にできます。
 
 ## フォルダの一覧
 
