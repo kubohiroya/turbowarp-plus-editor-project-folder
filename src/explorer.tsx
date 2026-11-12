@@ -10,6 +10,8 @@ import {canMoveExplorerEntry, copyExplorerFile, createExplorerDirectory, deleteE
     explorerNameAvailable, moveExplorerEntry, parentPath, renameExplorerEntry, resolveExplorerDirectory} from './explorer-files.js';
 import {actionCss, actionMessages, ExplorerFileDialog, ExplorerMenu} from './explorer-menu.js';
 import type {FileAction, MenuAnchor} from './explorer-menu.js';
+import {createFilePreview} from './file-preview.js';
+import type {FilePreviewRequest, ReadFileBaseline} from './file-preview.js';
 
 export type ExplorerMark = 'added' | 'modified' | 'deleted' | 'untracked';
 export type ExplorerFileStatus = {
@@ -50,6 +52,7 @@ const messages = {
     en: {
         label: 'Project folder', loading: 'Loading…', empty: 'This folder is empty.',
         noFolder: 'Open a project folder to show its files here.', open: 'Open Project Folder…',
+        unavailable: 'File tabs are unavailable in this editor layout.',
         failed: 'This folder could not be read.', denied: 'Permission to read this folder was not granted.',
         separator: ', ',
         marks: {added: 'Added', modified: 'Modified', deleted: 'Deleted', untracked: 'Untracked'},
@@ -65,6 +68,7 @@ const messages = {
     ja: {
         label: '作品フォルダ', loading: '読み込んでいます…', empty: 'このフォルダは空です。',
         noFolder: 'プロジェクトフォルダを開くと、ここにファイルを表示します。', open: 'プロジェクトフォルダを開く…',
+        unavailable: 'このエディターのレイアウトではファイルをタブで開けません。',
         failed: 'このフォルダを読み込めません。', denied: 'このフォルダを読む許可がありません。',
         separator: '、',
         marks: {added: '追加', modified: '変更', deleted: '削除', untracked: '未追跡'},
@@ -670,12 +674,24 @@ export type FollowMarks = (directory: FileSystemDirectoryHandle,
     update: (marks: ReadonlyMap<string, ExplorerMark>) => void) => () => void;
 export type FollowFileStatuses = (directory: FileSystemDirectoryHandle,
     update: (statuses: ReadonlyMap<string, ExplorerFileStatus>) => void) => () => void;
-type FolderViewProps = {vm: object; locale?: string; marks?: FollowMarks; fileStatuses?: FollowFileStatuses; git?: FollowExplorerGit};
+type FolderViewProps = {
+    vm: object;
+    locale?: string;
+    marks?: FollowMarks;
+    fileStatuses?: FollowFileStatuses;
+    git?: FollowExplorerGit;
+    /** Opens a transient file tab in the host workspace. */
+    openFile?(request: FilePreviewRequest): boolean;
+    /** Reads the latest committed version of a file, when the host has access to a Git repository. */
+    readBaseline?: ReadFileBaseline;
+};
+export type {FileBaseline, FilePreviewRequest, ReadFileBaseline} from './file-preview.js';
 
 const readJson = async (directory: FileSystemDirectoryHandle, name: string): Promise<Json> =>
     JSON.parse(await (await (await directory.getFileHandle(name)).getFile()).text());
 
-function FolderView({vm, locale, marks: followMarks, fileStatuses: followStatuses, git: followGit}: FolderViewProps) {
+function FolderView({vm, locale = 'en', marks: followMarks, fileStatuses: followStatuses, git: followGit,
+    openFile, readBaseline}: FolderViewProps) {
     const message = messagesFor(locale);
     const [{folder, directory, version}, setFollowed] = React.useState<{
         folder?: FollowedFolder; directory: FileSystemDirectoryHandle | null; version: number;
@@ -694,6 +710,7 @@ function FolderView({vm, locale, marks: followMarks, fileStatuses: followStatuse
         return () => {current = false;};
     }, [directory, version, locale]);
     const [marks, setMarks] = React.useState<ReadonlyMap<string, ExplorerMark>>();
+    const [unavailable, setUnavailable] = React.useState<FileSystemDirectoryHandle>();
     React.useEffect(() => {
         setMarks(undefined);
         if (!directory || !followMarks) return;
@@ -733,12 +750,18 @@ function FolderView({vm, locale, marks: followMarks, fileStatuses: followStatuse
             <button type="button" onClick={() => folder.open(locale ?? 'en')}>{message.open}</button>
         </div>;
     }
-    return <ProjectFolderExplorer directory={directory} locale={locale} descriptions={descriptions} marks={marks}
-        refreshKey={version} fileStatuses={statuses?.directory === directory ? statuses.paths : undefined}
-        unsavedPaths={unsaved?.directory === directory ? unsaved.paths : undefined}
-
-        mutate={operation => folder.mutate(directory, operation)} isCurrent={() => folder.directory === directory}
-        git={git?.directory === directory ? git.actions : undefined} />;
+    return <>
+        <ProjectFolderExplorer directory={directory} locale={locale} descriptions={descriptions} marks={marks}
+            refreshKey={version} fileStatuses={statuses?.directory === directory ? statuses.paths : undefined}
+            unsavedPaths={unsaved?.directory === directory ? unsaved.paths : undefined}
+            mutate={operation => folder.mutate(directory, operation)} isCurrent={() => folder.directory === directory}
+            git={git?.directory === directory ? git.actions : undefined}
+            onOpen={openFile && (entry => {
+                const request = createFilePreview(directory, `${keyFor(directory)}/${entry.path}`, entry, locale, readBaseline);
+                setUnavailable(openFile(request) ? undefined : directory);
+            })} />
+        {unavailable === directory && <p className={`${prefix}-status`} role="status">{message.unavailable}</p>}
+    </>;
 }
 
 /**
@@ -748,6 +771,6 @@ function FolderView({vm, locale, marks: followMarks, fileStatuses: followStatuse
  * Pass the same `marks` function across renders, or the marks are followed again.
  */
 export function renderProjectFolderExplorer(createElement: (component: any, props: any, ...children: any[]) => any,
-    {vm, locale = 'en', marks, fileStatuses, git}: FolderViewProps) {
-    return createElement(FolderView, {vm, locale, marks, fileStatuses, git});
+    {vm, locale = 'en', marks, fileStatuses, git, openFile, readBaseline}: FolderViewProps) {
+    return createElement(FolderView, {vm, locale, marks, fileStatuses, git, openFile, readBaseline});
 }
