@@ -7,7 +7,7 @@ import {tmpdir} from 'node:os';
 import {dirname, join} from 'node:path';
 import {test} from 'node:test';
 import {extensionIntegrity, importSb3} from '@kubohiroya/sb3-toolchain';
-import {mountProjectFolder, projectFolderActions} from '../dist/index.js';
+import {followProjectFolder, mountProjectFolder, projectFolderActions} from '../dist/index.js';
 
 const stringify = value => `${JSON.stringify(value, null, 2)}\n`;
 const md5 = data => createHash('md5').update(data).digest('hex');
@@ -118,7 +118,7 @@ function editor(initial, assetData) {
     const host = {isProjectDirty: () => false, beforeLoad() {}, onOpened() {}, onSaved() {}};
     const mounted = mountProjectFolder({vm, document, host, autoReload: false});
     return {
-        mounted, status,
+        mounted, status, vm,
         edit(change) {change(state.targets);},
         editProject(change) {change(state);},
         snapshot() {return JSON.parse(vm.toJSON());},
@@ -230,17 +230,23 @@ test('removes a sprite and deletes the asset nothing refers to after the project
 
 test('a failed project write puts the manifest back and removes the new asset', async t => {
     const {disk, app} = await setup(t);
+    let folder;
+    t.after(followProjectFolder(app.vm, current => {folder = current;}));
     const manifest = disk.manifest();
     app.edit(targets => {targets[1].costumes.push(reference('cat2', green));});
+    const pending = new Set(['project.source.json', 'sb3-source.json', `assets/${md5(green)}.svg`]);
+    assert.deepEqual(folder.unsavedPaths(), pending);
     disk.failures.add('project.source.json');
     assert.match(await app.save(), /^Could not access the project folder/u);
     assert.equal(disk.assetFiles.has(`${md5(green)}.svg`), false);
     assert.deepEqual(disk.manifest(), manifest);
     assert.equal(disk.project().targets[1].costumes.length, 1);
+    assert.deepEqual(folder.unsavedPaths(), pending);
     disk.failures.clear();
     disk.log.length = 0;
     assert.equal(await app.save(), 'Project folder saved.');
     assert.equal(disk.project().targets[1].costumes.length, 2);
+    assert.deepEqual(folder.unsavedPaths(), new Set());
 });
 
 test('refuses a new costume whose data the Editor does not have', async t => {

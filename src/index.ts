@@ -247,6 +247,8 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
     const unregister = registerFolder(vm, {
         get directory() {return session.directory;},
         subscribe: listener => session.subscribe(listener),
+        subscribeEdits: listener => session.subscribeEdits(listener),
+        unsavedPaths: () => session.unsavedPaths(),
         open: locale => menu.open(locale)
     });
     return {

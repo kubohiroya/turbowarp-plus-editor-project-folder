@@ -33,6 +33,16 @@ globalThis.renderExplorer = async locale => {
 
 globalThis.unmountExplorer = () => ReactDOM.unmountComponentAtNode(document.getElementById('root'));
 
+globalThis.renderFileStatuses = locale => render({directory: globalThis.droppedDirectory, locale,
+    unsavedPaths: new Set(['project.source.json']),
+    fileStatuses: new Map([
+        ['project.source.json', {change: 'modified', staged: true}],
+        ['README.md', {revision: 'committed'}],
+        ['sb3-source.json', {revision: 'pushed'}],
+        ['embedded-extensions.json', {revision: 'merged'}]
+    ])
+});
+
 // A folder whose permission was withdrawn: reading its entries fails.
 globalThis.renderDenied = locale => render({locale, directory: {kind: 'directory', name: 'Denied',
     async getDirectoryHandle() {throw new DOMException('denied', 'NotAllowedError');},

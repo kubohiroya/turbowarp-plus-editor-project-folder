@@ -8,6 +8,11 @@ import type {FollowedFolder} from './folder-registry.js';
 import type {Json, Project} from './source.js';
 
 export type ExplorerMark = 'added' | 'modified' | 'deleted' | 'untracked';
+export type ExplorerFileStatus = {
+    change?: ExplorerMark;
+    staged?: boolean;
+    revision?: 'committed' | 'pushed' | 'merged';
+};
 export type ExplorerEntry = {path: string; name: string; kind: 'file' | 'directory'};
 export type ProjectFolderExplorerProps = {
     /** The folder to show: a project folder or a repository root. It is only read. */
@@ -18,6 +23,10 @@ export type ProjectFolderExplorerProps = {
     descriptions?: ReadonlyMap<string, string>;
     /** Git status for an entry, by path relative to `directory`. */
     marks?: ReadonlyMap<string, ExplorerMark>;
+    fileStatuses?: ReadonlyMap<string, ExplorerFileStatus>;
+    unsavedPaths?: ReadonlySet<string>;
+    /** Changes after the folder contents have been saved or reloaded. */
+    refreshKey?: number;
     /** Called when a file is opened with Enter, Space or a click. */
     onOpen?(entry: ExplorerEntry): void;
     /** The tree's accessible name. Defaults to "Project folder". */
@@ -31,6 +40,8 @@ const messages = {
         failed: 'This folder could not be read.', denied: 'Permission to read this folder was not granted.',
         separator: ', ',
         marks: {added: 'Added', modified: 'Modified', deleted: 'Deleted', untracked: 'Untracked'},
+        unsaved: 'Unsaved changes', staged: 'Staged',
+        revisions: {committed: 'Committed', pushed: 'Pushed', merged: 'Pull request merged'},
         project: 'Project data', manifest: 'Folder manifest', extensions: 'Embedded extensions',
         assetsDirectory: 'Costume and sound files', extensionsDirectory: 'Extension files',
         costume: (sprite: string, name: string) => `${sprite} · costume ${name}`,
@@ -44,6 +55,8 @@ const messages = {
         failed: 'このフォルダを読み込めません。', denied: 'このフォルダを読む許可がありません。',
         separator: '、',
         marks: {added: '追加', modified: '変更', deleted: '削除', untracked: '未追跡'},
+        unsaved: '未保存の変更あり', staged: 'ステージ済み',
+        revisions: {committed: 'コミット済み', pushed: 'プッシュ済み', merged: 'PR マージ済み'},
         project: '作品データ', manifest: '作品フォルダの目録', extensions: '埋め込み拡張の一覧',
         assetsDirectory: 'コスチュームと音のファイル', extensionsDirectory: '拡張のファイル',
         costume: (sprite: string, name: string) => `${sprite} のコスチューム ${name}`,
@@ -125,7 +138,13 @@ padding-block:.15em;padding-inline-end:.4em;background:none;color:inherit;font:i
 .${prefix}-icon img{width:20px;height:20px;object-fit:contain;border-radius:2px;
 background:repeating-conic-gradient(rgba(128,128,128,.22) 0 25%,transparent 0 50%) 0 0/8px 8px}
 .${prefix}-icon img[hidden]{display:none}
+.${prefix}-filename{display:inline-flex;min-width:0}
 .${prefix}-name{overflow:hidden;text-overflow:ellipsis}
+.${prefix}-item[data-staged] .${prefix}-filename{font-weight:700}
+.${prefix}-item[data-revision="committed"] .${prefix}-filename{color:#174b9d;color:light-dark(#174b9d,#91c1ff)}
+.${prefix}-item[data-revision="pushed"] .${prefix}-filename{color:#67369a;color:light-dark(#67369a,#dfafff)}
+.${prefix}-item[data-revision="merged"] .${prefix}-filename{color:#17603e;color:light-dark(#17603e,#85e3ad)}
+.${prefix}-unsaved{flex:none}
 .${prefix}-mark{flex:none;font-size:.85em;padding:0 .3em;border:1px solid currentColor;border-radius:3px;opacity:.85}
 .${prefix}-description{overflow:hidden;text-overflow:ellipsis;opacity:.7;font-size:.9em}
 .${prefix}-status{opacity:.7;font-style:italic;padding-block:.15em}
@@ -218,10 +237,11 @@ function Icon({kind, path, readFile}: {kind: IconKind; path: string; readFile?: 
     );
 }
 
-function Explorer({directory, locale, descriptions, marks, onOpen, label}: ProjectFolderExplorerProps) {
+function Explorer({directory, locale, descriptions, marks, fileStatuses, unsavedPaths, refreshKey, onOpen, label}: ProjectFolderExplorerProps) {
     const message = messagesFor(locale);
     const [handles] = React.useState(() => new Map<string, FileSystemDirectoryHandle>([[rootId, directory]]));
     const [files] = React.useState(() => new Map<string, FileSystemFileHandle>());
+    const [loadedFolders] = React.useState(() => new Set<string>());
     const [rootLoaded, setRootLoaded] = React.useState(false);
     const collator = React.useMemo(() => new Intl.Collator(locale, {numeric: true, sensitivity: 'base'}), [locale]);
 
@@ -279,6 +299,7 @@ function Explorer({directory, locale, descriptions, marks, onOpen, label}: Proje
                         else files.set(path, entry as FileSystemFileHandle);
                         nodes.push({name: entry.name, path, kind: entry.kind});
                     }
+                    loadedFolders.add(id);
                     nodes.sort((a, b) => (a.kind === 'directory' ? 0 : 1) - (b.kind === 'directory' ? 0 : 1) ||
                         collator.compare(a.name, b.name) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
                     return nodes.map(data => ({id: data.path, data}));
@@ -295,25 +316,38 @@ function Explorer({directory, locale, descriptions, marks, onOpen, label}: Proje
         tree.setMounted(true);
         return () => tree.setMounted(false);
     }, [tree]);
+    const lastRefresh = React.useRef(refreshKey);
+    React.useEffect(() => {
+        if (lastRefresh.current === refreshKey) return;
+        lastRefresh.current = refreshKey;
+        void Promise.all([...loadedFolders].map(id => tree.getItemInstance(id).invalidateChildrenIds(true)));
+    }, [tree, loadedFolders, refreshKey]);
 
     const renderItem = (item: ItemInstance<Node>) => {
         const data = item.getItemData();
         const level = item.getItemMeta().level;
         const folder = item.isFolder();
         const expanded = folder && item.isExpanded();
-        const mark = data && data.kind !== 'error' ? marks?.get(data.path) : undefined;
+        const status = data?.kind === 'file' ? fileStatuses?.get(data.path) : undefined;
+        const unsaved = data?.kind === 'file' && unsavedPaths?.has(data.path);
+        const mark = status?.change ?? (data && data.kind !== 'error' ? marks?.get(data.path) : undefined);
         const markLabel = mark ? message.marks[mark] : '';
         const description = data && data.kind !== 'error' ? descriptions?.get(data.path) : undefined;
         const icon = !data || data.kind === 'error' ? undefined :
             folder ? (expanded ? 'folder-open' : 'folder') : iconFor(data.name);
-        const accessibleName = [item.getItemName(), markLabel, description].filter(Boolean).join(message.separator);
+        const accessibleName = [item.getItemName(), unsaved && message.unsaved, status?.staged && message.staged,
+            status?.revision && message.revisions[status.revision], markLabel, description].filter(Boolean).join(message.separator);
         const rows = [
             <button {...item.getProps()} key={item.getId()} type="button" aria-label={accessibleName}
                 className={`${prefix}-item${data?.kind === 'error' ? ` ${prefix}-error` : ''}`} style={indent(level)}
-                data-path={data?.path}>
+                data-path={data?.path} data-staged={status?.staged ? '' : undefined} data-revision={status?.revision}
+                title={unsaved || status?.staged || status?.revision ? accessibleName : undefined}>
                 <span className={`${prefix}-caret`} aria-hidden="true">{folder ? (expanded ? '▾' : '▸') : ''}</span>
                 {icon ? <Icon kind={icon} path={data!.path} readFile={icon === 'image' ? readFile : undefined} /> : null}
-                <span className={`${prefix}-name`}>{item.getItemName()}</span>
+                <span className={`${prefix}-filename`}>
+                    <span className={`${prefix}-name`}>{item.getItemName()}</span>
+                    {unsaved ? <span className={`${prefix}-unsaved`} aria-hidden="true">*</span> : null}
+                </span>
                 {markLabel ? <span className={`${prefix}-mark`} aria-hidden="true">{markLabel}</span> : null}
                 {description ? <span className={`${prefix}-description`} aria-hidden="true">{description}</span> : null}
             </button>
@@ -358,12 +392,14 @@ export function ProjectFolderExplorer(props: ProjectFolderExplorerProps) {
 /** Follows marks for the files under `directory`, by path relative to it. Returns the function that stops it. */
 export type FollowMarks = (directory: FileSystemDirectoryHandle,
     update: (marks: ReadonlyMap<string, ExplorerMark>) => void) => () => void;
-type FolderViewProps = {vm: object; locale?: string; marks?: FollowMarks};
+export type FollowFileStatuses = (directory: FileSystemDirectoryHandle,
+    update: (statuses: ReadonlyMap<string, ExplorerFileStatus>) => void) => () => void;
+type FolderViewProps = {vm: object; locale?: string; marks?: FollowMarks; fileStatuses?: FollowFileStatuses};
 
 const readJson = async (directory: FileSystemDirectoryHandle, name: string): Promise<Json> =>
     JSON.parse(await (await (await directory.getFileHandle(name)).getFile()).text());
 
-function FolderView({vm, locale, marks: followMarks}: FolderViewProps) {
+function FolderView({vm, locale, marks: followMarks, fileStatuses: followStatuses}: FolderViewProps) {
     const message = messagesFor(locale);
     const [{folder, directory, version}, setFollowed] = React.useState<{
         folder?: FollowedFolder; directory: FileSystemDirectoryHandle | null; version: number;
@@ -387,6 +423,27 @@ function FolderView({vm, locale, marks: followMarks}: FolderViewProps) {
         if (!directory || !followMarks) return;
         return followMarks(directory, setMarks);
     }, [directory, followMarks]);
+    const [statuses, setStatuses] = React.useState<{directory: FileSystemDirectoryHandle; paths: ReadonlyMap<string, ExplorerFileStatus>}>();
+    React.useEffect(() => {
+        if (!directory || !followStatuses) return;
+        return followStatuses(directory, paths => setStatuses({directory, paths}));
+    }, [directory, followStatuses]);
+    const [unsaved, setUnsaved] = React.useState<{directory: FileSystemDirectoryHandle; paths: ReadonlySet<string>}>();
+    React.useEffect(() => {
+        if (!folder || !directory) return;
+        const update = () => {
+            const paths = folder.unsavedPaths();
+            if (paths) setUnsaved({directory, paths});
+        };
+        let timer: ReturnType<typeof setTimeout>;
+        const schedule = () => {
+            clearTimeout(timer);
+            timer = setTimeout(update, 100);
+        };
+        update();
+        const stop = folder.subscribeEdits(schedule);
+        return () => {stop(); clearTimeout(timer);};
+    }, [folder, directory, version]);
     if (!folder) return null;
     if (!directory) {
         return <div className={`${prefix}-empty`}>
@@ -395,7 +452,9 @@ function FolderView({vm, locale, marks: followMarks}: FolderViewProps) {
             <button type="button" onClick={() => folder.open(locale ?? 'en')}>{message.open}</button>
         </div>;
     }
-    return <ProjectFolderExplorer directory={directory} locale={locale} descriptions={descriptions} marks={marks}/>;
+    return <ProjectFolderExplorer directory={directory} locale={locale} descriptions={descriptions} marks={marks}
+        refreshKey={version} fileStatuses={statuses?.directory === directory ? statuses.paths : undefined}
+        unsavedPaths={unsaved?.directory === directory ? unsaved.paths : undefined}/>;
 }
 
 /**
@@ -405,6 +464,6 @@ function FolderView({vm, locale, marks: followMarks}: FolderViewProps) {
  * Pass the same `marks` function across renders, or the marks are followed again.
  */
 export function renderProjectFolderExplorer(createElement: (component: any, props: any, ...children: any[]) => any,
-    {vm, locale = 'en', marks}: FolderViewProps) {
-    return createElement(FolderView, {vm, locale, marks});
+    {vm, locale = 'en', marks, fileStatuses}: FolderViewProps) {
+    return createElement(FolderView, {vm, locale, marks, fileStatuses});
 }
