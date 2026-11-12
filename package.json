@@ -1,6 +1,6 @@
 {
   "name": "@kubohiroya/turbowarp-plus-editor-project-folder",
-  "version": "0.9.0-issue.530",
+  "version": "0.9.0",
   "description": "Read and save expanded Scratch project folders in TurboWarp Plus Editor",
   "type": "module",
   "license": "MPL-2.0",
