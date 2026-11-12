@@ -167,7 +167,7 @@ background:repeating-conic-gradient(rgba(128,128,128,.22) 0 25%,transparent 0 50
 .${prefix}-unsaved{flex:none}
 .${prefix}-mark{flex:none;font-size:.85em;padding:0 .3em;border:1px solid currentColor;border-radius:3px;opacity:.85}
 .${prefix}-description{grid-column:3;min-width:0;padding:.2em .4em;border-radius:3px;background:rgba(128,128,128,.12);
-color:inherit;color:color-mix(in srgb,currentColor 78%,transparent);font-size:.85em;line-height:1.4;
+color:inherit;color:color-mix(in srgb,currentColor 78%,transparent);font-size:.75em;line-height:1.4;
 white-space:normal;overflow-wrap:anywhere}
 .${prefix}-status{opacity:.7;font-style:italic;padding-block:.15em}
 .${prefix}-empty{padding:.5em}

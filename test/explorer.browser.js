@@ -292,11 +292,11 @@ test('places folder and file descriptions below their names in a narrow tree', a
             return {
                 below: descriptionBox.top >= labelBox.bottom,
                 aligned: descriptionBox.left === labelBox.left,
-                smaller: parseFloat(getComputedStyle(description).fontSize) < parseFloat(getComputedStyle(label).fontSize),
+                fontScale: parseFloat(getComputedStyle(description).fontSize) / parseFloat(getComputedStyle(label).fontSize),
                 fits: description.scrollWidth === description.clientWidth
             };
         });
-        assert.deepEqual(layout, {below: true, aligned: true, smaller: true, fits: true});
+        assert.deepEqual(layout, {below: true, aligned: true, fontScale: 0.75, fits: true});
     }
     const description = asset.locator('.twpf-explorer-description');
     assert.ok(await description.evaluate(element =>
