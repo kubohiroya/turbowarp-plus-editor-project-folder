@@ -149,7 +149,18 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
         }
         return null;
     };
-    const changed = () => {revision++;};
+    const editListeners = new Set<() => void>();
+    const notifyEdits = () => {for (const listener of [...editListeners]) listener();};
+    const changed = () => {revision++; notifyEdits();};
+    const planSave = (session: Session, edited: Project) => {
+        const {source} = session;
+        const result = projectChanges(source.project, session.baseline, edited, identity(session, edited));
+        const extensionSave = planExtensionSave(source, result ?? source.project);
+        const needed = projectAssets(extensionSave.project);
+        const added = [...needed].filter(([name]) => !source.bytes.has(name));
+        const removed = [...source.bytes.keys()].filter(name => !needed.has(name));
+        return {result, extensionSave, added, removed};
+    };
     const loaded = () => setCurrent(null);
     vm.runtime.on('PROJECT_LOADED', loaded);
     vm.on('PROJECT_CHANGED', changed);
@@ -162,6 +173,7 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
         disposed = true;
         setCurrent(null);
         listeners.clear();
+        editListeners.clear();
         vm.runtime.off('PROJECT_LOADED', loaded);
         vm.off('PROJECT_CHANGED', changed);
     };
@@ -245,6 +257,28 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
         subscribe(listener: () => void) {
             listeners.add(listener);
             return () => {listeners.delete(listener);};
+        },
+        subscribeEdits(listener: () => void) {
+            editListeners.add(listener);
+            return () => {editListeners.delete(listener);};
+        },
+        /** Files affected by the pending save. A save in progress still owns its baseline. */
+        unsavedPaths(): ReadonlySet<string> | null {
+            if (busy) return null;
+            const paths = new Set<string>();
+            if (!current) return paths;
+            try {
+                const {result, extensionSave, added, removed} = planSave(current, snapshot());
+                if (result) paths.add(projectFile);
+                if (extensionSave.manifestChanged) paths.add(extensionsFile);
+                if (added.length || removed.length) paths.add(manifestFile);
+                for (const name of [...added.map(([name]) => name), ...removed]) paths.add(`assets/${name}`);
+                for (const name of [...extensionSave.writes.keys(), ...extensionSave.removed]) paths.add(`extensions/${name}`);
+            } catch (error) {
+                if (!(error instanceof FolderError)) throw error;
+                if (host.isProjectDirty()) paths.add(projectFile);
+            }
+            return paths;
         },
         get canSave() {return current !== null;},
         get busy() {return busy;},
@@ -334,9 +368,11 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
                 session.source.versions.set(projectFile, pending.update.version);
                 session.pending = null;
                 host.blockReload.onApplied(targets);
+                notify();
                 return true;
             } finally {
                 busy = false;
+                notifyEdits();
             }
         },
         /**
@@ -372,15 +408,12 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
                 const saveRevision = revision;
                 const edited = snapshot();
                 const ids = identify(edited);
-                const result = projectChanges(session.source.project, session.baseline, edited, identity(session, edited));
+                const {result, extensionSave, added: newAssets, removed} = planSave(session, edited);
                 await assertFolderUnchanged(session.source);
                 active(session);
                 const {source} = session;
-                const extensionSave = planExtensionSave(source, result ?? source.project);
-                const needed = projectAssets(extensionSave.project);
                 const added = new Map<string, Uint8Array>();
-                for (const [name, kind] of needed) {
-                    if (source.bytes.has(name)) continue;
+                for (const [name, kind] of newAssets) {
                     const data = assetData(name, kind);
                     if (!data) return unsupported(`The data of ${name} is not in the Editor`);
                     const [id, format] = name.split('.');
@@ -388,7 +421,6 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
                     if (asset.assetId !== id) return unsupported(`Asset hash mismatch: ${name}`);
                     added.set(name, data);
                 }
-                const removed = [...source.bytes.keys()].filter(name => !needed.has(name));
                 if (!result && !removed.length && !extensionSave.removed.length) {
                     if (revision === saveRevision) host.onSaved();
                     notify();
@@ -489,6 +521,7 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
                 return {status: 'saved', sourceRemoved: extensionSave.sourceRemoved};
             } finally {
                 busy = false;
+                notifyEdits();
             }
         },
         dispose

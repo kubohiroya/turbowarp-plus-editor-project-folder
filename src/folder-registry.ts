@@ -2,6 +2,8 @@
 export interface FollowedFolder {
     readonly directory: FileSystemDirectoryHandle | null;
     subscribe(listener: () => void): () => void;
+    subscribeEdits(listener: () => void): () => void;
+    unsavedPaths(): ReadonlySet<string> | null;
     /** Asks for a folder and opens it, as the File menu's Open Project Folder… does. */
     open(locale: string): void;
 }
