@@ -92,7 +92,7 @@ async function makeFolder(t) {
 let harness;
 async function open(t, {withFolder = true} = {}) {
     harness ??= await bundleHarness(t);
-    const browser = await chromium.launch();
+    const browser = await chromium.launch({headless: true});
     t.after(() => browser.close());
     const page = await browser.newPage();
     const errors = [];
@@ -126,6 +126,29 @@ async function open(t, {withFolder = true} = {}) {
 }
 
 const names = async page => page.locator('[role="treeitem"] .twpf-explorer-name').allTextContents();
+
+test('shows unsaved and staged together and distinguishes file revisions in light and dark', async t => {
+    const page = await open(t);
+    await page.evaluate(() => window.renderFileStatuses('ja'));
+    const file = page.getByRole('treeitem', {name: 'project.source.json、未保存の変更あり、ステージ済み、変更'});
+    await expect(file).toHaveAttribute('title', 'project.source.json、未保存の変更あり、ステージ済み、変更');
+    await expect(file.locator('.twpf-explorer-filename')).toHaveText('project.source.json*');
+    await expect(file.locator('.twpf-explorer-filename')).toHaveCSS('font-weight', '700');
+    await file.focus();
+    await page.keyboard.press('Enter');
+    assert.equal(await page.evaluate(() => window.opened.at(-1).path), 'project.source.json');
+    const revisions = [
+        ['README.md、コミット済み', 'rgb(23, 75, 157)', 'rgb(145, 193, 255)'],
+        ['sb3-source.json、プッシュ済み', 'rgb(103, 54, 154)', 'rgb(223, 175, 255)'],
+        ['embedded-extensions.json、PR マージ済み', 'rgb(23, 96, 62)', 'rgb(133, 227, 173)']
+    ];
+    for (const [index, scheme] of ['light', 'dark'].entries()) {
+        await page.evaluate(value => {document.documentElement.style.colorScheme = value;}, scheme);
+        for (const [name, ...colors] of revisions) {
+            await expect(page.getByRole('treeitem', {name}).locator('.twpf-explorer-filename')).toHaveCSS('color', colors[index]);
+        }
+    }
+});
 
 test('lists the folder with folders first and .git hidden, and loads a folder when it is expanded', async t => {
     const page = await open(t);

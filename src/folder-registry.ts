@@ -1,9 +1,14 @@
 /** The project folder mounted for a VM, as a view of the folder follows it. */
+export type ExplorerMutation = (guard: () => void) => Promise<void>;
+
 export interface FollowedFolder {
     readonly directory: FileSystemDirectoryHandle | null;
     subscribe(listener: () => void): () => void;
+    subscribeEdits(listener: () => void): () => void;
+    unsavedPaths(): ReadonlySet<string> | null;
     /** Asks for a folder and opens it, as the File menu's Open Project Folder… does. */
     open(locale: string): void;
+    mutate(directory: FileSystemDirectoryHandle, operation: ExplorerMutation): Promise<void>;
 }
 const folders = new WeakMap<object, FollowedFolder>();
 // Views rendered before the folder is mounted, or after it is disposed, wait for the VM's folder here.
