@@ -4,6 +4,8 @@ export default defineConfig({
     build: {
         // The pinned Scratch GUI still parses the library with Webpack 4.
         target: 'es2017',
+        // Leave class bindings intact for Webpack 4's scope hoisting and final minification.
+        minify: false,
         license: {fileName: 'THIRD_PARTY_NOTICES.md'},
         lib: {
             entry: {index: 'src/index.ts', explorer: 'src/explorer.tsx'},
