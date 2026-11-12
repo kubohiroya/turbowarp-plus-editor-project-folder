@@ -249,7 +249,8 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
         subscribe: listener => session.subscribe(listener),
         subscribeEdits: listener => session.subscribeEdits(listener),
         unsavedPaths: () => session.unsavedPaths(),
-        open: locale => menu.open(locale)
+        open: locale => menu.open(locale),
+        mutate: (directory, operation) => session.mutate(directory, operation).finally(renderReload)
     });
     return {
         openDirectory: (...args: Parameters<typeof session.openDirectory>) =>
