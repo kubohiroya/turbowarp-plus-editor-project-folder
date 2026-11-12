@@ -5,6 +5,7 @@ import {applyBlockReload, planBlockReload} from './block-reload.js';
 import type {ReloadTarget} from './block-reload.js';
 import {applyScriptReload, planScriptReload} from './script-reload.js';
 import type {DeserializeBlocks, ScriptReloadTarget} from './script-reload.js';
+import {createProjectFolder} from './create-folder.js';
 
 export interface FolderVM {
     runtime: {
@@ -44,6 +45,7 @@ export interface FolderHost {
     beforeLoad(): void;
     onOpened(title: string): void;
     onSaved(): void;
+    saveWithLock?<T>(save: () => Promise<T>): Promise<T>;
     blockReload?: {
         isRunning(): boolean;
         subscribe(listener: () => void): () => void;
@@ -167,7 +169,10 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
     };
     const openFrom = async (
         getDirectory: () => Promise<FileSystemDirectoryHandle | null>,
-        confirmReplace: () => boolean
+        confirmReplace: () => boolean,
+        prepare: (directory: FileSystemDirectoryHandle) => Promise<FolderSource | null> =
+            directory => readFolder(directory, vm.runtime.storage),
+        stillCurrent = () => true
     ): Promise<OpenResult> => {
         if (disposed || busy) return 'cancelled';
         busy = true;
@@ -176,8 +181,8 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
             const directory = await getDirectory();
             if (!directory || disposed) return 'cancelled';
             const storage = vm.runtime.storage;
-            const source = await readFolder(directory, storage);
-            if (disposed || vm.runtime.getTargetForStage() !== priorStage) return 'cancelled';
+            const source = await prepare(directory);
+            if (!source || disposed || !stillCurrent() || vm.runtime.getTargetForStage() !== priorStage) return 'cancelled';
             if (host.isProjectDirty() && !confirmReplace()) return 'cancelled';
             host.beforeLoad();
             setCurrent(null);
@@ -363,6 +368,20 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
         openDirectory(directory: FileSystemDirectoryHandle, confirmReplace: () => boolean): Promise<OpenResult> {
             return openFrom(() => Promise.resolve(directory), confirmReplace);
         },
+        createFromSnapshot(getDirectory: () => Promise<FileSystemDirectoryHandle | null>,
+            prepareFiles: () => Promise<ReadonlyMap<string, Uint8Array>>, isCurrent: () => boolean): Promise<OpenResult> {
+            const stage = vm.runtime.getTargetForStage();
+            let savedRevision: number | undefined;
+            const currentProject = () => !disposed && vm.runtime.getTargetForStage() === stage &&
+                (savedRevision === undefined || revision === savedRevision) && isCurrent();
+            return openFrom(getDirectory, currentProject, async directory => {
+                if (!currentProject()) return null;
+                savedRevision = revision;
+                const files = await prepareFiles();
+                if (!currentProject()) return null;
+                return createProjectFolder({directory, files, storage: vm.runtime.storage, current: currentProject});
+            }, currentProject);
+        },
         async save(): Promise<SaveResult> {
             if (!current || busy) throw new FolderError('conflict');
             const session = current;
@@ -403,8 +422,8 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
                     manifest = encoder.encode(`${JSON.stringify(value, null, 2)}\n`);
                 }
                 const root = {directory: source.directory, files: source.files, prefix: ''};
-                const assets = {directory: await source.directory.getDirectoryHandle('assets'), files: source.bytes, prefix: 'assets/'};
-                const extensions = {directory: await source.directory.getDirectoryHandle('extensions'),
+                const assets = {directory: await source.directory.getDirectoryHandle('assets', {create: true}), files: source.bytes, prefix: 'assets/'};
+                const extensions = {directory: await source.directory.getDirectoryHandle('extensions', {create: true}),
                     files: source.extensionBytes, prefix: 'extensions/'};
                 const undo: (() => Promise<void>)[] = [];
                 const write = async ({directory, files, prefix}: SaveDirectory, name: string, data: Uint8Array) => {

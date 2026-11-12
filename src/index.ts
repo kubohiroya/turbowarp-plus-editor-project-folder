@@ -8,6 +8,7 @@ export type {ReloadTarget} from './block-reload.js';
 export {followProjectFolder} from './folder-registry.js';
 export type {FollowedFolder} from './folder-registry.js';
 export type {DeserializeBlocks} from './script-reload.js';
+export {createProjectFolder} from './create-folder.js';
 
 const messages = {
     en: {
@@ -235,7 +236,12 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
         save(locale) {
             if (!session.busy) {
                 const message = messageFor(locale);
-                void session.save().then(({status, sourceRemoved}) => {
+                const directory = session.directory;
+                const save = () => {
+                    if (session.directory !== directory) throw new FolderError('conflict');
+                    return session.save();
+                };
+                void (host.saveWithLock?.(save) ?? save()).then(({status, sourceRemoved}) => {
                     const detail = sourceRemoved.length ? ` ${message.sourceRemoved(sourceRemoved)}` : '';
                     report(message[status] + detail);
                 }, error => fail(locale, error)).finally(renderReload);
@@ -252,6 +258,22 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
     return {
         openDirectory: (...args: Parameters<typeof session.openDirectory>) =>
             session.openDirectory(...args).finally(renderReload),
+        save: () => session.save().finally(renderReload),
+        createFromSnapshot({prepareFiles, directory, current = () => true}: {
+            prepareFiles: () => Promise<ReadonlyMap<string, Uint8Array>>;
+            directory?: FileSystemDirectoryHandle;
+            current?: () => boolean;
+        }) {
+            return session.createFromSnapshot(async () => {
+                if (directory) return directory;
+                try {
+                    return await pickDirectory.call(view, {id: 'turbowarp-plus-project-folder', mode: 'readwrite'});
+                } catch (error) {
+                    if (error instanceof DOMException && error.name === 'AbortError') return null;
+                    throw error;
+                }
+            }, prepareFiles, current).finally(renderReload);
+        },
         /**
          * The folder the loaded project came from, or `null` once another project loaded or the folder was
          * detached. A host can tell projects apart by it, for example to keep the layout of each one.
