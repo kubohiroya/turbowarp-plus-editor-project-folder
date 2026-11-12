@@ -2,10 +2,14 @@ import * as React from 'react';
 import {asyncDataLoaderFeature, hotkeysCoreFeature, selectionFeature} from '@headless-tree/core';
 import type {ItemInstance} from '@headless-tree/core';
 import {useTree} from '@headless-tree/react/react17';
-import {isObject, manifestFile, projectFile} from './source.js';
+import {FolderError, isObject, manifestFile, projectFile} from './source.js';
 import {followProjectFolder} from './folder-registry.js';
-import type {FollowedFolder} from './folder-registry.js';
+import type {ExplorerMutation, FollowedFolder} from './folder-registry.js';
 import type {Json, Project} from './source.js';
+import {copyExplorerFile, deleteExplorerEntry, ExplorerFileError, parentPath, renameExplorerEntry,
+    resolveExplorerDirectory} from './explorer-files.js';
+import {actionCss, actionMessages, ExplorerFileDialog, ExplorerMenu} from './explorer-menu.js';
+import type {MenuAnchor} from './explorer-menu.js';
 
 export type ExplorerMark = 'added' | 'modified' | 'deleted' | 'untracked';
 export type ExplorerFileStatus = {
@@ -14,8 +18,13 @@ export type ExplorerFileStatus = {
     revision?: 'committed' | 'pushed' | 'merged';
 };
 export type ExplorerEntry = {path: string; name: string; kind: 'file' | 'directory'};
+export type ExplorerGit = {
+    change(kind: 'stage' | 'unstage', entry: ExplorerEntry, isCurrent: () => boolean): Promise<{done: boolean; error?: string}>;
+    refresh(): Promise<void>;
+};
+export type FollowExplorerGit = (directory: FileSystemDirectoryHandle, update: (git?: ExplorerGit) => void) => () => void;
 export type ProjectFolderExplorerProps = {
-    /** The folder to show: a project folder or a repository root. It is only read. */
+    /** The folder to show: a project folder or a repository root. */
     directory: FileSystemDirectoryHandle;
     /** 'ja…' shows Japanese text; anything else shows English. */
     locale?: string;
@@ -31,6 +40,10 @@ export type ProjectFolderExplorerProps = {
     onOpen?(entry: ExplorerEntry): void;
     /** The tree's accessible name. Defaults to "Project folder". */
     label?: string;
+    /** Runs an explorer write in the host's active folder session. Without this, the tree is read-only. */
+    mutate?(operation: ExplorerMutation): Promise<void>;
+    git?: ExplorerGit;
+    isCurrent?(): boolean;
 };
 
 const messages = {
@@ -114,7 +127,7 @@ export function describeProjectFolder(project: Project, locale?: string, {manife
     return descriptions;
 }
 
-type Node = {name: string; path: string; kind: 'file' | 'directory' | 'error'; message?: string};
+type ExplorerNode = {name: string; path: string; kind: 'file' | 'directory' | 'error'; message?: string};
 type Message = typeof messages.en;
 const rootId = '/';
 // '\0' cannot appear in a file name, so the error row never collides with a real entry.
@@ -237,12 +250,25 @@ function Icon({kind, path, readFile}: {kind: IconKind; path: string; readFile?: 
     );
 }
 
-function Explorer({directory, locale, descriptions, marks, fileStatuses, unsavedPaths, refreshKey, onOpen, label}: ProjectFolderExplorerProps) {
+function Explorer({directory, locale, descriptions, marks, fileStatuses, unsavedPaths, refreshKey,
+    onOpen, label, mutate, git, isCurrent}: ProjectFolderExplorerProps) {
     const message = messagesFor(locale);
+    const actions = actionMessages(locale);
     const [handles] = React.useState(() => new Map<string, FileSystemDirectoryHandle>([[rootId, directory]]));
     const [files] = React.useState(() => new Map<string, FileSystemFileHandle>());
     const [loadedFolders] = React.useState(() => new Set<string>());
     const [rootLoaded, setRootLoaded] = React.useState(false);
+    const [drag, setDrag] = React.useState<string | null>(null);
+    const [menu, setMenu] = React.useState<{entry: ExplorerEntry; anchor: MenuAnchor}>();
+    const [dialog, setDialog] = React.useState<{entry: ExplorerEntry; anchor: MenuAnchor; rename: boolean}>();
+    const [feedback, setFeedback] = React.useState('');
+    const [working, setWorking] = React.useState(false);
+    const running = React.useRef(false);
+    const mounted = React.useRef(true);
+    React.useEffect(() => {
+        mounted.current = true;
+        return () => {mounted.current = false;};
+    }, []);
     const collator = React.useMemo(() => new Intl.Collator(locale, {numeric: true, sensitivity: 'base'}), [locale]);
 
     const directoryAt = async (id: string) => {
@@ -262,7 +288,7 @@ function Explorer({directory, locale, descriptions, marks, fileStatuses, unsaved
         }
         return handle.getFile();
     };
-    const tree = useTree<Node>({
+    const tree = useTree<ExplorerNode>({
         rootItemId: rootId,
         initialState: {expandedItems: [], selectedItems: [], focusedItem: null},
         getItemName: item => item.getItemData()?.name ?? '',
@@ -291,9 +317,9 @@ function Explorer({directory, locale, descriptions, marks, fileStatuses, unsaved
                 try {
                     const handle = await directoryAt(id);
                     const base = id === rootId ? '' : `${id}/`;
-                    const nodes: Node[] = [];
+                    const nodes: ExplorerNode[] = [];
                     for await (const entry of (handle as IterableDirectory).values()) {
-                        if (entry.kind === 'directory' && entry.name === '.git') continue;
+                        if (entry.name.toLowerCase() === '.git') continue;
                         const path = base + entry.name;
                         if (entry.kind === 'directory') handles.set(path, entry as FileSystemDirectoryHandle);
                         else files.set(path, entry as FileSystemFileHandle);
@@ -323,8 +349,129 @@ function Explorer({directory, locale, descriptions, marks, fileStatuses, unsaved
         void Promise.all([...loadedFolders].map(id => tree.getItemInstance(id).invalidateChildrenIds(true)));
     }, [tree, loadedFolders, refreshKey]);
 
-    const renderItem = (item: ItemInstance<Node>) => {
+    const errorText = (error: unknown) => {
+        if (error instanceof ExplorerFileError) return actions[error.code];
+        if (error instanceof DOMException && ['NotAllowedError', 'SecurityError'].includes(error.name)) return actions.denied;
+        if (error instanceof FolderError && error.code === 'conflict') return actions.conflict;
+        return actions.failed;
+    };
+    const run = async (operation: () => Promise<string | void>) => {
+        if (running.current) return;
+        running.current = true;
+        setWorking(true);
+        setFeedback('');
+        try {
+            const result = await operation();
+            if (mounted.current) setFeedback(result ?? '');
+        } catch (error) {
+            if (mounted.current) setFeedback(errorText(error));
+        } finally {
+            running.current = false;
+            if (mounted.current) setWorking(false);
+        }
+    };
+    const write = (path: string, operation: (parent: FileSystemDirectoryHandle, guard: () => void) => Promise<void>) =>
+        mutate!(async guard => {
+            const permission = (directory as FileSystemDirectoryHandle & {
+                requestPermission?(options: {mode: 'readwrite'}): Promise<PermissionState>;
+            }).requestPermission;
+            if (permission && await permission.call(directory, {mode: 'readwrite'}) !== 'granted') {
+                throw new DOMException('Write permission denied', 'NotAllowedError');
+            }
+            guard();
+            const parent = await resolveExplorerDirectory(directory, path);
+            guard();
+            await operation(parent, guard);
+        });
+    const reread = async (path: string, expand = false) => {
+        if (!mounted.current) return;
+        const parent = path ? tree.getItemInstance(path) : tree.getRootItem();
+        if (expand && path && !parent.isExpanded()) parent.expand();
+        await parent.invalidateChildrenIds(true);
+    };
+    const forget = (path: string) => {
+        const cache = tree.getDataRef() as React.MutableRefObject<{childrenIds: Record<string, string[]>}>;
+        for (const id of handles.keys()) {
+            if (id !== path && !id.startsWith(`${path}/`)) continue;
+            delete cache.current.childrenIds[id];
+            loadedFolders.delete(id);
+            handles.delete(id);
+        }
+        for (const id of files.keys()) if (id === path || id.startsWith(`${path}/`)) files.delete(id);
+    };
+    const dropPath = (target: EventTarget) =>
+        (target as Element).closest('[data-drop-directory]')?.getAttribute('data-drop-directory') ?? '';
+    const acceptsFiles = (event: React.DragEvent) => Boolean(mutate && event.dataTransfer.types.includes('Files'));
+    const drop = (event: React.DragEvent<HTMLDivElement>) => {
+        if (!acceptsFiles(event)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        setDrag(null);
+        const path = dropPath(event.target);
+        const items = Array.from(event.dataTransfer.items);
+        const problems: string[] = [];
+        const dropped = items.length ? items.flatMap(item => {
+            if (item.kind !== 'file') return [];
+            const entry = item.webkitGetAsEntry?.();
+            if (entry?.isDirectory) {
+                problems.push(`${entry.name} — ${actions.filesOnly}`);
+                return [];
+            }
+            const file = item.getAsFile();
+            return file ? [file] : [];
+        }) : Array.from(event.dataTransfer.files);
+        void run(async () => {
+            if (!dropped.length) return problems.join('\n') || actions.filesOnly;
+            try {
+                await write(path, async (parent, guard) => {
+                    for (const file of dropped) {
+                        guard();
+                        try {await copyExplorerFile(parent, file, guard);}
+                        catch (error) {problems.push(`${actions.copyFailed} ${file.name} — ${errorText(error)}`);}
+                    }
+                });
+            } finally {
+                await reread(path, true);
+                await git?.refresh();
+            }
+            return problems.join('\n');
+        });
+    };
+    const closeMenu = (restoreFocus: boolean) => {
+        setMenu(undefined);
+        if (restoreFocus && menu?.anchor.row.isConnected) menu.anchor.row.focus({preventScroll: true});
+    };
+    const showMenu = (event: React.MouseEvent<HTMLButtonElement> | React.KeyboardEvent<HTMLButtonElement>, entry: ExplorerEntry) => {
+        if (running.current || (!mutate && !git)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const row = event.currentTarget;
+        const rect = row.getBoundingClientRect();
+        const pointer = 'clientX' in event && (event.clientX || event.clientY);
+        setMenu({entry, anchor: {row, x: pointer ? event.clientX : rect.left, y: pointer ? event.clientY : rect.bottom}});
+    };
+    const submitFileAction = (name: string) => {
+        if (!dialog) return;
+        const {entry, rename} = dialog;
+        setDialog(undefined);
+        if (rename && entry.name === name) return;
+        void run(async () => {
+            const parent = parentPath(entry.path);
+            try {
+                await write(parent, (handle, guard) => rename ? renameExplorerEntry(handle, entry, name, guard) :
+                    deleteExplorerEntry(handle, entry, guard));
+            } finally {
+                if (mounted.current) forget(entry.path);
+                await reread(parent);
+                await git?.refresh();
+            }
+        });
+    };
+    const renderItem = (item: ItemInstance<ExplorerNode>) => {
         const data = item.getItemData();
+        const entry: ExplorerEntry | undefined = data?.path && data.kind !== 'error' ?
+            {path: data.path, name: data.name, kind: data.kind} : undefined;
+        const itemProps = item.getProps();
         const level = item.getItemMeta().level;
         const folder = item.isFolder();
         const expanded = folder && item.isExpanded();
@@ -338,10 +485,18 @@ function Explorer({directory, locale, descriptions, marks, fileStatuses, unsaved
         const accessibleName = [item.getItemName(), unsaved && message.unsaved, status?.staged && message.staged,
             status?.revision && message.revisions[status.revision], markLabel, description].filter(Boolean).join(message.separator);
         const rows = [
-            <button {...item.getProps()} key={item.getId()} type="button" aria-label={accessibleName}
+            <button {...itemProps} key={item.getId()} type="button" aria-label={accessibleName}
                 className={`${prefix}-item${data?.kind === 'error' ? ` ${prefix}-error` : ''}`} style={indent(level)}
                 data-path={data?.path} data-staged={status?.staged ? '' : undefined} data-revision={status?.revision}
-                title={unsaved || status?.staged || status?.revision ? accessibleName : undefined}>
+                title={unsaved || status?.staged || status?.revision ? accessibleName : undefined}
+                data-drop-directory={entry?.kind === 'directory' ? entry.path : entry ? parentPath(entry.path) : undefined}
+                data-drop-active={entry?.kind === 'directory' && drag === entry.path ? '' : undefined}
+                aria-haspopup={entry && (mutate || git) ? 'menu' : undefined}
+                onContextMenu={entry ? event => showMenu(event, entry) : undefined}
+                onKeyDown={entry ? event => {
+                    if ((mutate || git) && (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10'))) showMenu(event, entry);
+                    else itemProps.onKeyDown?.(event);
+                } : itemProps.onKeyDown}>
                 <span className={`${prefix}-caret`} aria-hidden="true">{folder ? (expanded ? '▾' : '▸') : ''}</span>
                 {icon ? <Icon kind={icon} path={data!.path} readFile={icon === 'image' ? readFile : undefined} /> : null}
                 <span className={`${prefix}-filename`}>
@@ -360,14 +515,43 @@ function Explorer({directory, locale, descriptions, marks, fileStatuses, unsaved
     };
     const items = tree.getItems();
     return (
-        <div className={prefix}>
-            <style>{css}</style>
+        <div className={`${prefix}${mutate ? ` ${prefix}-drop` : ''}`}
+            data-drop-active={drag === '' ? '' : undefined} onDrop={drop}
+            onDragOver={event => {
+                if (!acceptsFiles(event)) return;
+                event.preventDefault();
+                event.stopPropagation();
+                event.dataTransfer.dropEffect = running.current ? 'none' : 'copy';
+                if (!running.current) setDrag(dropPath(event.target));
+            }}
+            onDragLeave={event => {
+                if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDrag(null);
+            }}>
+            <style>{css + actionCss}</style>
             <div {...tree.getContainerProps(label ?? message.label)}>
                 {items.map(renderItem)}
             </div>
             {items.length ? null : (
                 <div className={`${prefix}-status`} role="status">{rootLoaded ? message.empty : message.loading}</div>
             )}
+            {working || feedback ? <div className={`${prefix}-feedback`} role={feedback ? 'alert' : 'status'}>
+                {feedback || actions.working}
+            </div> : null}
+            {menu ? <ExplorerMenu anchor={menu.anchor} label={actions.actions} close={closeMenu} actions={[
+                ...(mutate ? [
+                    {label: actions.rename, run: () => {closeMenu(false); setDialog({...menu, rename: true});}},
+                    {label: actions.delete, run: () => {closeMenu(false); setDialog({...menu, rename: false});}}
+                ] : []),
+                ...(git ? (['stage', 'unstage'] as const).map(kind => ({label: actions[kind], run: () => {
+                    closeMenu(true);
+                    void run(async () => {
+                        const result = await git.change(kind, menu.entry, isCurrent ?? (() => mounted.current));
+                        if (!result.done) return result.error ?? actions.conflict;
+                    });
+                }})) : [])
+            ]} /> : null}
+            {dialog ? <ExplorerFileDialog anchor={dialog.anchor} name={dialog.entry.name} folder={dialog.entry.kind === 'directory'}
+                rename={dialog.rename} message={actions} close={() => setDialog(undefined)} submit={submitFileAction} /> : null}
         </div>
     );
 }
@@ -394,12 +578,12 @@ export type FollowMarks = (directory: FileSystemDirectoryHandle,
     update: (marks: ReadonlyMap<string, ExplorerMark>) => void) => () => void;
 export type FollowFileStatuses = (directory: FileSystemDirectoryHandle,
     update: (statuses: ReadonlyMap<string, ExplorerFileStatus>) => void) => () => void;
-type FolderViewProps = {vm: object; locale?: string; marks?: FollowMarks; fileStatuses?: FollowFileStatuses};
+type FolderViewProps = {vm: object; locale?: string; marks?: FollowMarks; fileStatuses?: FollowFileStatuses; git?: FollowExplorerGit};
 
 const readJson = async (directory: FileSystemDirectoryHandle, name: string): Promise<Json> =>
     JSON.parse(await (await (await directory.getFileHandle(name)).getFile()).text());
 
-function FolderView({vm, locale, marks: followMarks, fileStatuses: followStatuses}: FolderViewProps) {
+function FolderView({vm, locale, marks: followMarks, fileStatuses: followStatuses, git: followGit}: FolderViewProps) {
     const message = messagesFor(locale);
     const [{folder, directory, version}, setFollowed] = React.useState<{
         folder?: FollowedFolder; directory: FileSystemDirectoryHandle | null; version: number;
@@ -444,6 +628,11 @@ function FolderView({vm, locale, marks: followMarks, fileStatuses: followStatuse
         const stop = folder.subscribeEdits(schedule);
         return () => {stop(); clearTimeout(timer);};
     }, [folder, directory, version]);
+    const [git, setGit] = React.useState<{directory: FileSystemDirectoryHandle; actions?: ExplorerGit}>();
+    React.useEffect(() => {
+        if (!directory || !followGit) return;
+        return followGit(directory, actions => setGit({directory, actions}));
+    }, [directory, followGit]);
     if (!folder) return null;
     if (!directory) {
         return <div className={`${prefix}-empty`}>
@@ -454,7 +643,9 @@ function FolderView({vm, locale, marks: followMarks, fileStatuses: followStatuse
     }
     return <ProjectFolderExplorer directory={directory} locale={locale} descriptions={descriptions} marks={marks}
         refreshKey={version} fileStatuses={statuses?.directory === directory ? statuses.paths : undefined}
-        unsavedPaths={unsaved?.directory === directory ? unsaved.paths : undefined}/>;
+        unsavedPaths={unsaved?.directory === directory ? unsaved.paths : undefined}
+        mutate={operation => folder.mutate(directory, operation)} isCurrent={() => folder.directory === directory}
+        git={git?.directory === directory ? git.actions : undefined} />;
 }
 
 /**
@@ -464,6 +655,6 @@ function FolderView({vm, locale, marks: followMarks, fileStatuses: followStatuse
  * Pass the same `marks` function across renders, or the marks are followed again.
  */
 export function renderProjectFolderExplorer(createElement: (component: any, props: any, ...children: any[]) => any,
-    {vm, locale = 'en', marks, fileStatuses}: FolderViewProps) {
-    return createElement(FolderView, {vm, locale, marks, fileStatuses});
+    {vm, locale = 'en', marks, fileStatuses, git}: FolderViewProps) {
+    return createElement(FolderView, {vm, locale, marks, fileStatuses, git});
 }

@@ -300,6 +300,19 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
             return typeof pending === 'object' && pending !== null ? pending.update.version : null;
         },
         get directory() {return current?.source.directory ?? null;},
+        async mutate(directory: FileSystemDirectoryHandle, operation: (guard: () => void) => Promise<void>) {
+            const session = current;
+            if (!session || busy || session.source.directory !== directory) throw new FolderError('conflict');
+            const guard = () => active(session);
+            guard();
+            busy = true;
+            try {
+                await operation(guard);
+            } finally {
+                busy = false;
+                if (current === session) notify();
+            }
+        },
         /**
          * Reads what to compare before unsaved edits are replaced. `editor` is `null` when the edits cannot be
          * written to the folder, and `disk` when the folder's project file cannot be read.
