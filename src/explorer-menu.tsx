@@ -3,21 +3,23 @@ import {createPortal} from 'react-dom';
 
 export const actionMessages = (locale = 'en') => locale.toLowerCase().startsWith('ja') ? {
     actions: 'ファイルとフォルダの操作', rename: '名前を変更…', renameTitle: '名前を変更', delete: '削除…', deleteTitle: '削除',
-    newName: '新しい名前', cancel: 'キャンセル',
+    createFolder: '新規フォルダを作成', folderName: 'フォルダ名', newName: '新しい名前', cancel: 'キャンセル',
     remove: (name: string, folder: boolean) => folder ? `「${name}」とその中身を削除しますか？` : `「${name}」を削除しますか？`,
     stage: 'Git にステージ', unstage: 'Git のステージを解除',
     working: '処理中…', copyFailed: 'コピーできませんでした', filesOnly: 'ファイルをドロップしてください。',
     invalidName: 'この名前は使用できません。', exists: '同じ名前のファイルまたはフォルダがあります。',
+    invalidDestination: 'このフォルダには移動できません。',
     denied: 'このフォルダへの書き込みが許可されていません。', conflict: 'プロジェクトフォルダが変更されたか、別の操作が実行中です。',
     sourceChanged: '操作中に対象が変更されました。', originalKept: '元の項目を削除できなかったため、コピーを残しました。',
     cleanupFailed: '失敗したコピーを削除できませんでした。', failed: '操作を完了できませんでした。'
 } : {
     actions: 'File and folder actions', rename: 'Rename…', renameTitle: 'Rename', delete: 'Delete…', deleteTitle: 'Delete',
-    newName: 'New name', cancel: 'Cancel',
+    createFolder: 'Create New Folder', folderName: 'Folder name', newName: 'New name', cancel: 'Cancel',
     remove: (name: string, folder: boolean) => folder ? `Delete “${name}” and its contents?` : `Delete “${name}”?`,
     stage: 'Stage in Git', unstage: 'Unstage in Git',
     working: 'Working…', copyFailed: 'Could not copy', filesOnly: 'Drop files here.',
     invalidName: 'This name cannot be used.', exists: 'A file or folder with this name already exists.',
+    invalidDestination: 'This item cannot be moved to that folder.',
     denied: 'Permission to write to this folder was not granted.', conflict: 'The project folder changed or another operation is running.',
     sourceChanged: 'The item changed during the operation.', originalKept: 'The original could not be removed, so the copy was kept.',
     cleanupFailed: 'The incomplete copy could not be removed.', failed: 'The operation could not be completed.'
@@ -25,6 +27,7 @@ export const actionMessages = (locale = 'en') => locale.toLowerCase().startsWith
 
 export type ActionMessages = ReturnType<typeof actionMessages>;
 export type MenuAnchor = {row: HTMLButtonElement; x: number; y: number};
+export type FileAction = 'createFolder' | 'rename' | 'delete';
 
 export const actionCss = `
 .twpf-explorer-actions{position:fixed;z-index:2147483647;max-width:calc(100vw - 8px);padding:4px;
@@ -40,6 +43,11 @@ border:1px solid GrayText;border-radius:6px;padding:1em;overflow-wrap:anywhere}
 .twpf-explorer-dialog-footer{display:flex;justify-content:flex-end;gap:.5em;margin-top:1em}
 .twpf-explorer-drop{min-height:100%;box-sizing:border-box}
 .twpf-explorer [data-drop-active],.twpf-explorer[data-drop-active]{outline:2px solid Highlight;outline-offset:-2px}
+.twpf-explorer-item[data-move-unavailable]{color:GrayText;opacity:.65;filter:grayscale(1)}
+.twpf-explorer-item[data-move-active] .twpf-explorer-name{font-weight:700}
+.twpf-explorer-drag-image{position:fixed;top:0;left:0;z-index:2147483647;pointer-events:none;
+display:flex;align-items:center;gap:.4em;max-width:18em;white-space:nowrap;padding:.3em .5em;
+border:1px solid GrayText;border-radius:4px;background:Canvas;color:CanvasText;box-shadow:0 2px 8px #0004}
 .twpf-explorer-feedback{white-space:pre-wrap;overflow-wrap:anywhere;padding:.25em .5em}
 `;
 
@@ -87,14 +95,14 @@ export function ExplorerMenu({anchor, label, actions, close}: {
     </div>, document.body);
 }
 
-export function ExplorerFileDialog({anchor, name, folder, rename, message, close, submit}: {
-    anchor: MenuAnchor; name: string; folder: boolean; rename: boolean; message: ActionMessages;
+export function ExplorerFileDialog({anchor, name, folder, action, message, close, submit}: {
+    anchor: MenuAnchor; name: string; folder: boolean; action: FileAction; message: ActionMessages;
     close(): void; submit(name: string): void;
 }) {
     const ref = React.useRef<HTMLDialogElement>(null);
     const input = React.useRef<HTMLInputElement>(null);
     const cancel = React.useRef<HTMLButtonElement>(null);
-    const title = rename ? message.renameTitle : message.deleteTitle;
+    const title = action === 'createFolder' ? message.createFolder : action === 'rename' ? message.renameTitle : message.deleteTitle;
     React.useLayoutEffect(() => {
         const dialog = ref.current!;
         dialog.showModal();
@@ -114,8 +122,10 @@ export function ExplorerFileDialog({anchor, name, folder, rename, message, close
             submit(input.current?.value ?? name);
         }}>
             <h2>{title}</h2>
-            {rename ? <label>{message.newName}<input ref={input} defaultValue={name} required /></label> :
-                <p>{message.remove(name, folder)}</p>}
+            {action === 'delete' ? <p>{message.remove(name, folder)}</p> :
+                <label>{action === 'rename' ? message.newName : message.folderName}
+                    <input ref={input} defaultValue={action === 'rename' ? name : ''} required />
+                </label>}
             <div className="twpf-explorer-dialog-footer">
                 <button ref={cancel} type="button" onClick={close}>{message.cancel}</button>
                 <button type="submit">{title}</button>

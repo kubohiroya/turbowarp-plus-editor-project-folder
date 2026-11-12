@@ -1,7 +1,7 @@
 type DirectoryEntries = FileSystemDirectoryHandle & {values(): AsyncIterable<FileSystemHandle>};
 
 export class ExplorerFileError extends Error {
-    constructor(readonly code: 'invalidName' | 'exists' | 'sourceChanged' | 'originalKept' | 'cleanupFailed') {
+    constructor(readonly code: 'invalidName' | 'exists' | 'invalidDestination' | 'sourceChanged' | 'originalKept' | 'cleanupFailed') {
         super(code);
     }
 }
@@ -27,14 +27,25 @@ export async function resolveExplorerDirectory(root: FileSystemDirectoryHandle, 
     return directory;
 }
 
-async function assertUnused(directory: FileSystemDirectoryHandle, name: string) {
+export async function explorerNameAvailable(directory: FileSystemDirectoryHandle, name: string) {
     try {
         await directory.getFileHandle(name);
     } catch (error) {
-        if (error instanceof DOMException && error.name === 'NotFoundError') return;
+        if (error instanceof DOMException && error.name === 'NotFoundError') return true;
         if (!(error instanceof DOMException) || error.name !== 'TypeMismatchError') throw error;
     }
-    throw new ExplorerFileError('exists');
+    return false;
+}
+
+async function assertUnused(directory: FileSystemDirectoryHandle, name: string) {
+    if (!await explorerNameAvailable(directory, name)) throw new ExplorerFileError('exists');
+}
+
+export async function createExplorerDirectory(parent: FileSystemDirectoryHandle, name: string, guard: () => void) {
+    validateName(name);
+    await assertUnused(parent, name);
+    guard();
+    await parent.getDirectoryHandle(name, {create: true});
 }
 
 const sameVersion = (a: File, b: File) => a.size === b.size && a.lastModified === b.lastModified;
@@ -129,14 +140,33 @@ async function removeIncompleteCopy(parent: FileSystemDirectoryHandle, name: str
 export async function renameExplorerEntry(parent: FileSystemDirectoryHandle, entry: {name: string; kind: FileSystemHandleKind},
     name: string, guard: () => void) {
     if (name === entry.name) return;
+    await relocateEntry(parent, entry, parent, name, guard);
+}
+
+export function canMoveExplorerEntry(path: string, destination: string) {
+    return parentPath(path) !== destination && path !== destination && !destination.startsWith(`${path}/`);
+}
+
+export async function moveExplorerEntry(root: FileSystemDirectoryHandle,
+    entry: {path: string; name: string; kind: FileSystemHandleKind}, destination: FileSystemDirectoryHandle,
+    destinationPath: string, guard: () => void) {
+    if (!canMoveExplorerEntry(entry.path, destinationPath)) throw new ExplorerFileError('invalidDestination');
+    const parent = await resolveExplorerDirectory(root, parentPath(entry.path));
+    guard();
+    await relocateEntry(parent, entry, destination, entry.name, guard);
+}
+
+async function relocateEntry(sourceParent: FileSystemDirectoryHandle, entry: {name: string; kind: FileSystemHandleKind},
+    destination: FileSystemDirectoryHandle, name: string, guard: () => void) {
+    validateName(entry.name);
     validateName(name);
-    const source = entry.kind === 'file' ? await parent.getFileHandle(entry.name) : await parent.getDirectoryHandle(entry.name);
-    const copy = await copyEntry(parent, source, parent, name, guard);
+    const source = entry.kind === 'file' ? await sourceParent.getFileHandle(entry.name) : await sourceParent.getDirectoryHandle(entry.name);
+    const copy = await copyEntry(sourceParent, source, destination, name, guard);
     try {
         await copy.verify();
         guard();
     } catch (error) {
-        await removeIncompleteCopy(parent, name);
+        await removeIncompleteCopy(destination, name);
         throw error;
     }
     try {
