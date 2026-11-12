@@ -67,12 +67,14 @@ export type FolderSource = FolderFiles & {
     embedded: ExtensionManifest;
 };
 
-const getFile = async (dir: FileSystemDirectoryHandle, name: string) => (await dir.getFileHandle(name)).getFile();
+const getFile = async (dir: FileSystemDirectoryHandle | null, name: string) =>
+    dir ? (await dir.getFileHandle(name)).getFile() : unsupported(`Missing folder for ${name}`);
 export const fileVersion = (file: File) => `${file.size}:${file.lastModified}`;
 const fileBytes = async (file: File) => new Uint8Array(await file.arrayBuffer());
-const readBytes = async (dir: FileSystemDirectoryHandle, name: string) => fileBytes(await getFile(dir, name));
-const readNames = async (dir: FileSystemDirectoryHandle) => {
+const readBytes = async (dir: FileSystemDirectoryHandle | null, name: string) => fileBytes(await getFile(dir, name));
+const readNames = async (dir: FileSystemDirectoryHandle | null) => {
     const names = new Set<string>();
+    if (!dir) return names;
     // Directory iteration is available alongside the picker, but absent from older DOM typings.
     for await (const entry of (dir as FileSystemDirectoryHandle & {values(): AsyncIterable<FileSystemHandle>}).values()) {
         if (entry.kind !== 'file') return unsupported('Nested entries are outside the supported source format');
@@ -80,6 +82,11 @@ const readNames = async (dir: FileSystemDirectoryHandle) => {
     }
     return names;
 };
+// Git does not retain empty asset or extension directories.
+const readDirectory = (dir: FileSystemDirectoryHandle, name: string) => dir.getDirectoryHandle(name).catch(error => {
+    if (error instanceof DOMException && error.name === 'NotFoundError') return null;
+    throw error;
+});
 const sameNames = (actual: Set<string>, expected: Iterable<string>) => {
     const expectedNames = new Set(expected);
     return actual.size === expectedNames.size && [...actual].every(name => expectedNames.has(name));
@@ -267,7 +274,7 @@ export function planExtensionSave(source: FolderSource, project: Project) {
 
 export async function readFolder(directory: FileSystemDirectoryHandle, storage: Storage): Promise<FolderSource> {
     const versions = new Map<string, string>();
-    const readEntry = async (dir: FileSystemDirectoryHandle, name: string, prefix = '') => {
+    const readEntry = async (dir: FileSystemDirectoryHandle | null, name: string, prefix = '') => {
         const file = await getFile(dir, name);
         versions.set(prefix + name, fileVersion(file));
         return [name, await fileBytes(file)] as const;
@@ -291,7 +298,7 @@ export async function readFolder(directory: FileSystemDirectoryHandle, storage: 
         return unsupported('Asset references and archiveEntries do not match');
     }
     expected.delete('project.json');
-    const [assets, extensions] = await Promise.all([directory.getDirectoryHandle('assets'), directory.getDirectoryHandle('extensions')]);
+    const [assets, extensions] = await Promise.all([readDirectory(directory, 'assets'), readDirectory(directory, 'extensions')]);
     const scripts = extensionNames(extensionManifest.extensions);
     if (!sameNames(await readNames(assets), expected) || !sameNames(await readNames(extensions), scripts)) {
         return unsupported('Unexpected or missing source files');
@@ -325,7 +332,7 @@ export async function readFolderUpdate(source: FolderSource, previous: FolderUpd
     const {directory, versions} = source;
     try {
         const [assets, extensions, project] = await Promise.all([
-            directory.getDirectoryHandle('assets'), directory.getDirectoryHandle('extensions'), getFile(directory, projectFile)
+            readDirectory(directory, 'assets'), readDirectory(directory, 'extensions'), getFile(directory, projectFile)
         ]);
         const [assetNames, extensionNames] = await Promise.all([readNames(assets), readNames(extensions)]);
         if (!sameNames(assetNames, source.bytes.keys()) || !sameNames(extensionNames, source.extensionBytes.keys())) return 'structure';
@@ -356,8 +363,9 @@ export async function readFolderUpdate(source: FolderSource, previous: FolderUpd
 
 export async function assertFolderUnchanged(source: FolderSource) {
     try {
-        const assets = await source.directory.getDirectoryHandle('assets');
-        const extensions = await source.directory.getDirectoryHandle('extensions');
+        const [assets, extensions] = await Promise.all([
+            readDirectory(source.directory, 'assets'), readDirectory(source.directory, 'extensions')
+        ]);
         if (!sameNames(await readNames(assets), source.bytes.keys()) ||
             !sameNames(await readNames(extensions), source.extensionBytes.keys())) throw new FolderError('conflict');
         for (const [directory, files] of [[source.directory, source.files], [assets, source.bytes], [extensions, source.extensionBytes]] as const) {
