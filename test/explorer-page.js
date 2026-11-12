@@ -33,6 +33,21 @@ globalThis.renderExplorer = async locale => {
 
 globalThis.unmountExplorer = () => ReactDOM.unmountComponentAtNode(document.getElementById('root'));
 
+globalThis.renderWritableExplorer = async () => {
+    const directory = await navigator.storage.getDirectory();
+    const source = await directory.getDirectoryHandle('source', {create: true});
+    await source.getDirectoryHandle('empty', {create: true});
+    const file = await source.getFileHandle('note.txt', {create: true});
+    const stream = await file.createWritable();
+    await stream.write('notes\0data');
+    await stream.close();
+    const collision = await directory.getDirectoryHandle('collision', {create: true});
+    await collision.getDirectoryHandle('source', {create: true});
+    await collision.getFileHandle('note.txt', {create: true});
+    await directory.getDirectoryHandle('destination', {create: true});
+    return render({directory, locale: 'ja', mutate: operation => operation(() => {})});
+};
+
 globalThis.renderFileStatuses = locale => render({directory: globalThis.droppedDirectory, locale,
     unsavedPaths: new Set(['project.source.json']),
     fileStatuses: new Map([

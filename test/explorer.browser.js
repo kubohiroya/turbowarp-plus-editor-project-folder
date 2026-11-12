@@ -107,6 +107,7 @@ async function open(t, {withFolder = true} = {}) {
     await page.addInitScript(() => {
         for (const type of ['dragenter', 'dragover', 'drop']) {
             window.addEventListener(type, async event => {
+                if (!event.dataTransfer.types.includes('Files')) return;
                 event.preventDefault();
                 if (type === 'drop') window.droppedDirectory = await event.dataTransfer.items[0].getAsFileSystemHandle();
             }, {capture: true});
@@ -124,6 +125,94 @@ async function open(t, {withFolder = true} = {}) {
     }
     return page;
 }
+
+test('creates folders and moves files and folder trees with drag feedback', async t => {
+    const page = await open(t, {withFolder: false});
+    await page.evaluate(async () => {
+        const setDragImage = DataTransfer.prototype.setDragImage;
+        DataTransfer.prototype.setDragImage = function (image, x, y) {
+            window.dragPreview = {name: image.textContent, icon: image.querySelector('[data-icon]')?.dataset.icon};
+            setDragImage.call(this, image, x, y);
+        };
+        await window.renderWritableExplorer();
+    });
+    const row = path => page.locator(`[data-path="${path}"]`);
+    const unavailable = page.locator('[data-move-unavailable]');
+    const active = page.locator('[data-move-active]');
+    const createFolder = async name => {
+        await row('destination').click({button: 'right'});
+        await page.getByRole('menuitem', {name: '新規フォルダを作成'}).click();
+        const dialog = page.getByRole('dialog', {name: '新規フォルダを作成'});
+        await dialog.getByRole('textbox', {name: 'フォルダ名'}).fill(name);
+        await dialog.getByRole('button', {name: '新規フォルダを作成'}).click();
+    };
+    await createFolder('整理');
+    await expect(row('destination/整理')).toBeVisible();
+    await createFolder('整理');
+    await expect(page.getByRole('alert')).toContainText('同じ名前のファイルまたはフォルダがあります。');
+    await row('source').click();
+    await expect(row('source/note.txt')).toBeVisible();
+
+    const center = async item => {
+        const box = await row(item).boundingBox();
+        assert.ok(box);
+        return [box.x + box.width / 2, box.y + box.height / 2];
+    };
+    const startDrag = async item => {
+        const [x, y] = await center(item);
+        await page.mouse.move(x, y);
+        await page.mouse.down();
+        await page.mouse.move(x + 12, y, {steps: 4});
+        await expect(row(item)).toHaveAttribute('data-move-unavailable', '');
+    };
+    const hover = async item => {
+        const [x, y] = await center(item);
+        await page.mouse.move(x, y);
+        await page.mouse.move(x + 1, y);
+    };
+
+    await startDrag('source');
+    assert.deepEqual(await page.evaluate(() => window.dragPreview), {name: 'source', icon: 'folder-open'});
+    await expect(row('source/empty')).toHaveAttribute('data-move-unavailable', '');
+    await expect(row('collision')).toHaveAttribute('data-move-unavailable', '');
+    await expect(row('destination')).not.toHaveAttribute('data-move-unavailable', '');
+    await hover('source/empty');
+    await expect(active).toHaveCount(0);
+    await hover('destination');
+    await expect(row('destination')).toHaveAttribute('data-move-active', '');
+    await expect(row('destination').locator('.twpf-explorer-name')).toHaveCSS('font-weight', '700');
+    await page.keyboard.press('Escape');
+    await page.mouse.up();
+    await expect(unavailable).toHaveCount(0);
+    await expect(row('source/note.txt')).toBeVisible();
+
+    await startDrag('source/note.txt');
+    assert.deepEqual(await page.evaluate(() => window.dragPreview), {name: 'note.txt', icon: 'text'});
+    await expect(row('source')).toHaveAttribute('data-move-unavailable', '');
+    await expect(row('collision')).toHaveAttribute('data-move-unavailable', '');
+    await expect(row('destination/整理')).not.toHaveAttribute('data-move-unavailable', '');
+    await hover('destination/整理');
+    await expect(row('destination/整理')).toHaveAttribute('data-move-active', '');
+    await page.mouse.up();
+    await expect(row('destination/整理/note.txt')).toBeVisible();
+    await expect(row('source/note.txt')).toHaveCount(0);
+    await expect(unavailable).toHaveCount(0);
+
+    await startDrag('source');
+    await expect(row('destination')).not.toHaveAttribute('data-move-unavailable', '');
+    await hover('destination');
+    await page.mouse.up();
+    await expect(row('destination/source')).toBeVisible();
+    await expect(row('source')).toHaveCount(0);
+    await row('destination/source').click();
+    await expect(row('destination/source/empty')).toBeVisible();
+    assert.equal(await page.evaluate(async () => {
+        const root = await navigator.storage.getDirectory();
+        const destination = await root.getDirectoryHandle('destination');
+        const created = await destination.getDirectoryHandle('整理');
+        return (await (await created.getFileHandle('note.txt')).getFile()).text();
+    }), 'notes\0data');
+});
 
 const names = async page => page.locator('[role="treeitem"] .twpf-explorer-name').allTextContents();
 

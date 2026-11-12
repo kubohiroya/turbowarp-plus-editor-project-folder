@@ -6,10 +6,10 @@ import {FolderError, isObject, manifestFile, projectFile} from './source.js';
 import {followProjectFolder} from './folder-registry.js';
 import type {ExplorerMutation, FollowedFolder} from './folder-registry.js';
 import type {Json, Project} from './source.js';
-import {copyExplorerFile, deleteExplorerEntry, ExplorerFileError, parentPath, renameExplorerEntry,
-    resolveExplorerDirectory} from './explorer-files.js';
+import {canMoveExplorerEntry, copyExplorerFile, createExplorerDirectory, deleteExplorerEntry, ExplorerFileError,
+    explorerNameAvailable, moveExplorerEntry, parentPath, renameExplorerEntry, resolveExplorerDirectory} from './explorer-files.js';
 import {actionCss, actionMessages, ExplorerFileDialog, ExplorerMenu} from './explorer-menu.js';
-import type {MenuAnchor} from './explorer-menu.js';
+import type {FileAction, MenuAnchor} from './explorer-menu.js';
 
 export type ExplorerMark = 'added' | 'modified' | 'deleted' | 'untracked';
 export type ExplorerFileStatus = {
@@ -139,6 +139,7 @@ const failure = (error: unknown, message: Message) =>
         message.denied : message.failed;
 
 const prefix = 'twpf-explorer';
+const entryDragType = 'application/x-twpf-explorer-entry';
 // Colors come from the host's text color, so the tree follows light and dark themes.
 const css = `.${prefix}{font:inherit;color:inherit}
 .${prefix}-item{display:flex;align-items:center;gap:.4em;width:100%;box-sizing:border-box;margin:0;border:0;border-radius:3px;
@@ -259,8 +260,9 @@ function Explorer({directory, locale, descriptions, marks, fileStatuses, unsaved
     const [loadedFolders] = React.useState(() => new Set<string>());
     const [rootLoaded, setRootLoaded] = React.useState(false);
     const [drag, setDrag] = React.useState<string | null>(null);
+    const [move, setMove] = React.useState<{entry: ExplorerEntry; destinations: ReadonlySet<string>}>();
     const [menu, setMenu] = React.useState<{entry: ExplorerEntry; anchor: MenuAnchor}>();
-    const [dialog, setDialog] = React.useState<{entry: ExplorerEntry; anchor: MenuAnchor; rename: boolean}>();
+    const [dialog, setDialog] = React.useState<{entry: ExplorerEntry; anchor: MenuAnchor; action: FileAction}>();
     const [feedback, setFeedback] = React.useState('');
     const [working, setWorking] = React.useState(false);
     const running = React.useRef(false);
@@ -401,8 +403,74 @@ function Explorer({directory, locale, descriptions, marks, fileStatuses, unsaved
     };
     const dropPath = (target: EventTarget) =>
         (target as Element).closest('[data-drop-directory]')?.getAttribute('data-drop-directory') ?? '';
+    const moveDropPath = (target: EventTarget) => {
+        const row = (target as Element).closest<HTMLButtonElement>(`.${prefix}-item`);
+        const path = row ? row.getAttribute('data-move-directory') : '';
+        return path !== null && move?.destinations.has(path) ? path : null;
+    };
+    const startMove = (event: React.DragEvent<HTMLButtonElement>, entry: ExplorerEntry) => {
+        if (running.current || dialog) {
+            event.preventDefault();
+            return;
+        }
+        event.stopPropagation();
+        setMenu(undefined);
+        setDrag(null);
+        event.dataTransfer.effectAllowed = 'move';
+        event.dataTransfer.setData(entryDragType, entry.path);
+        const row = event.currentTarget;
+        const document = row.ownerDocument;
+        const image = document.createElement('div');
+        image.className = `${prefix}-drag-image`;
+        const icon = row.querySelector(`.${prefix}-icon`);
+        if (icon) image.appendChild(icon.cloneNode(true));
+        const name = document.createElement('span');
+        name.className = `${prefix}-name`;
+        name.textContent = entry.name;
+        image.appendChild(name);
+        document.body.appendChild(image);
+        event.dataTransfer.setDragImage(image, -12, -12);
+        document.defaultView?.requestAnimationFrame(() => image.remove());
+
+        setMove({entry, destinations: new Set()});
+        const candidates = ['', ...tree.getItems().filter(item => item.isFolder()).map(item => item.getId())];
+        void Promise.all(candidates.filter(path => canMoveExplorerEntry(entry.path, path)).map(async path => {
+            try {
+                return await explorerNameAvailable(await directoryAt(path || rootId), entry.name) ? path : null;
+            } catch {
+                return null;
+            }
+        })).then(paths => {
+            if (mounted.current) setMove(current => current?.entry === entry ?
+                {entry, destinations: new Set(paths.filter(path => path !== null))} : current);
+        });
+    };
+    const endMove = () => {
+        setMove(undefined);
+        setDrag(null);
+    };
+    const dropMove = (event: React.DragEvent<HTMLDivElement>, entry: ExplorerEntry) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const path = moveDropPath(event.target);
+        endMove();
+        if (path === null || event.dataTransfer.getData(entryDragType) !== entry.path) return;
+        void run(async () => {
+            let moved = false;
+            try {
+                await write(path, (destination, guard) => moveExplorerEntry(directory, entry, destination, path, guard));
+                moved = true;
+            } finally {
+                if (mounted.current) forget(entry.path);
+                await reread(parentPath(entry.path));
+                await reread(path, moved);
+                await git?.refresh();
+            }
+        });
+    };
     const acceptsFiles = (event: React.DragEvent) => Boolean(mutate && event.dataTransfer.types.includes('Files'));
     const drop = (event: React.DragEvent<HTMLDivElement>) => {
+        if (move && event.dataTransfer.types.includes(entryDragType)) return dropMove(event, move.entry);
         if (!acceptsFiles(event)) return;
         event.preventDefault();
         event.stopPropagation();
@@ -452,17 +520,22 @@ function Explorer({directory, locale, descriptions, marks, fileStatuses, unsaved
     };
     const submitFileAction = (name: string) => {
         if (!dialog) return;
-        const {entry, rename} = dialog;
+        const {entry, action} = dialog;
         setDialog(undefined);
-        if (rename && entry.name === name) return;
+        if (action === 'rename' && entry.name === name) return;
         void run(async () => {
-            const parent = parentPath(entry.path);
+            const parent = action === 'createFolder' ? entry.path : parentPath(entry.path);
+            let changed = false;
             try {
-                await write(parent, (handle, guard) => rename ? renameExplorerEntry(handle, entry, name, guard) :
-                    deleteExplorerEntry(handle, entry, guard));
+                await write(parent, (handle, guard) => {
+                    if (action === 'createFolder') return createExplorerDirectory(handle, name, guard);
+                    if (action === 'rename') return renameExplorerEntry(handle, entry, name, guard);
+                    return deleteExplorerEntry(handle, entry, guard);
+                });
+                changed = true;
             } finally {
-                if (mounted.current) forget(entry.path);
-                await reread(parent);
+                if (mounted.current && action !== 'createFolder') forget(entry.path);
+                await reread(parent, action === 'createFolder' && changed);
                 await git?.refresh();
             }
         });
@@ -484,6 +557,8 @@ function Explorer({directory, locale, descriptions, marks, fileStatuses, unsaved
             folder ? (expanded ? 'folder-open' : 'folder') : iconFor(data.name);
         const accessibleName = [item.getItemName(), unsaved && message.unsaved, status?.staged && message.staged,
             status?.revision && message.revisions[status.revision], markLabel, description].filter(Boolean).join(message.separator);
+        const moveDestination = entry?.kind === 'directory' && move?.destinations.has(entry.path);
+        const moveActive = moveDestination && drag === entry.path;
         const rows = [
             <button {...itemProps} key={item.getId()} type="button" aria-label={accessibleName}
                 className={`${prefix}-item${data?.kind === 'error' ? ` ${prefix}-error` : ''}`} style={indent(level)}
@@ -491,6 +566,12 @@ function Explorer({directory, locale, descriptions, marks, fileStatuses, unsaved
                 title={unsaved || status?.staged || status?.revision ? accessibleName : undefined}
                 data-drop-directory={entry?.kind === 'directory' ? entry.path : entry ? parentPath(entry.path) : undefined}
                 data-drop-active={entry?.kind === 'directory' && drag === entry.path ? '' : undefined}
+                data-move-directory={entry?.kind === 'directory' ? entry.path : undefined}
+                data-move-unavailable={move && !moveDestination ? '' : undefined}
+                data-move-active={moveActive ? '' : undefined}
+                draggable={entry && mutate ? !working : undefined}
+                onDragStart={entry && mutate ? event => startMove(event, entry) : undefined}
+                onDragEnd={entry && mutate ? endMove : undefined}
                 aria-haspopup={entry && (mutate || git) ? 'menu' : undefined}
                 onContextMenu={entry ? event => showMenu(event, entry) : undefined}
                 onKeyDown={entry ? event => {
@@ -518,6 +599,14 @@ function Explorer({directory, locale, descriptions, marks, fileStatuses, unsaved
         <div className={`${prefix}${mutate ? ` ${prefix}-drop` : ''}`}
             data-drop-active={drag === '' ? '' : undefined} onDrop={drop}
             onDragOver={event => {
+                if (move && event.dataTransfer.types.includes(entryDragType)) {
+                    const path = running.current ? null : moveDropPath(event.target);
+                    event.stopPropagation();
+                    if (path !== null) event.preventDefault();
+                    event.dataTransfer.dropEffect = path === null ? 'none' : 'move';
+                    setDrag(path);
+                    return;
+                }
                 if (!acceptsFiles(event)) return;
                 event.preventDefault();
                 event.stopPropagation();
@@ -538,9 +627,12 @@ function Explorer({directory, locale, descriptions, marks, fileStatuses, unsaved
                 {feedback || actions.working}
             </div> : null}
             {menu ? <ExplorerMenu anchor={menu.anchor} label={actions.actions} close={closeMenu} actions={[
+                ...(mutate && menu.entry.kind === 'directory' ? [
+                    {label: actions.createFolder, run: () => {closeMenu(false); setDialog({...menu, action: 'createFolder'});}}
+                ] : []),
                 ...(mutate ? [
-                    {label: actions.rename, run: () => {closeMenu(false); setDialog({...menu, rename: true});}},
-                    {label: actions.delete, run: () => {closeMenu(false); setDialog({...menu, rename: false});}}
+                    {label: actions.rename, run: () => {closeMenu(false); setDialog({...menu, action: 'rename'});}},
+                    {label: actions.delete, run: () => {closeMenu(false); setDialog({...menu, action: 'delete'});}}
                 ] : []),
                 ...(git ? (['stage', 'unstage'] as const).map(kind => ({label: actions[kind], run: () => {
                     closeMenu(true);
@@ -551,7 +643,7 @@ function Explorer({directory, locale, descriptions, marks, fileStatuses, unsaved
                 }})) : [])
             ]} /> : null}
             {dialog ? <ExplorerFileDialog anchor={dialog.anchor} name={dialog.entry.name} folder={dialog.entry.kind === 'directory'}
-                rename={dialog.rename} message={actions} close={() => setDialog(undefined)} submit={submitFileAction} /> : null}
+                action={dialog.action} message={actions} close={() => setDialog(undefined)} submit={submitFileAction} /> : null}
         </div>
     );
 }
@@ -564,7 +656,7 @@ const keyFor = (directory: FileSystemDirectoryHandle) => {
 };
 
 /**
- * A read-only tree of a folder for the Editor's side panel, built on Headless Tree. Folders load when expanded, folders
+ * A tree of a folder for the Editor's side panel, built on Headless Tree. Folders load when expanded, folders
  * sort before files, and `.git` is hidden. Keyboard: arrow keys, Home and End move and expand; Enter or Space opens a
  * file. Needs React 16.14–18 from the host.
  */
@@ -644,6 +736,7 @@ function FolderView({vm, locale, marks: followMarks, fileStatuses: followStatuse
     return <ProjectFolderExplorer directory={directory} locale={locale} descriptions={descriptions} marks={marks}
         refreshKey={version} fileStatuses={statuses?.directory === directory ? statuses.paths : undefined}
         unsavedPaths={unsaved?.directory === directory ? unsaved.paths : undefined}
+
         mutate={operation => folder.mutate(directory, operation)} isCurrent={() => folder.directory === directory}
         git={git?.directory === directory ? git.actions : undefined} />;
 }
