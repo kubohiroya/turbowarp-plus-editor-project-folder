@@ -417,18 +417,23 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
         openDirectory(directory: FileSystemDirectoryHandle, confirmReplace: () => boolean): Promise<OpenResult> {
             return openFrom(() => Promise.resolve(directory), confirmReplace);
         },
-        createFromSnapshot(getDirectory: () => Promise<FileSystemDirectoryHandle | null>,
+        createFromSnapshot(selectDestination: () => Promise<{directory: FileSystemDirectoryHandle; overwrite: boolean} | null>,
             prepareFiles: () => Promise<ReadonlyMap<string, Uint8Array>>, isCurrent: () => boolean): Promise<OpenResult> {
             const stage = vm.runtime.getTargetForStage();
             let savedRevision: number | undefined;
             const currentProject = () => !disposed && vm.runtime.getTargetForStage() === stage &&
                 (savedRevision === undefined || revision === savedRevision) && isCurrent();
-            return openFrom(getDirectory, currentProject, async directory => {
+            let overwrite = false;
+            return openFrom(async () => {
+                const destination = await selectDestination();
+                overwrite = destination?.overwrite ?? false;
+                return destination?.directory ?? null;
+            }, currentProject, async directory => {
                 if (!currentProject()) return null;
                 savedRevision = revision;
                 const files = await prepareFiles();
                 if (!currentProject()) return null;
-                return createProjectFolder({directory, files, storage: vm.runtime.storage, current: currentProject});
+                return createProjectFolder({directory, files, storage: vm.runtime.storage, overwrite, current: currentProject});
             }, currentProject);
         },
         async save(): Promise<SaveResult> {

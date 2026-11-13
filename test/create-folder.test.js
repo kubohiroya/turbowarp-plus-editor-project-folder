@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {createProjectFolder, mountProjectFolder} from '../dist/index.js';
+import {createProjectFolder, mountProjectFolder, projectFolderOverwriteWarning} from '../dist/index.js';
 
 const bytes = value => new TextEncoder().encode(JSON.stringify(value));
 const notFound = () => new DOMException('Missing entry', 'NotFoundError');
@@ -11,6 +11,13 @@ const seed = new Map([
         embeddedExtensions: 'embedded-extensions.json', assetsDirectory: 'assets', archiveEntries: ['project.json']})],
     ['embedded-extensions.json', bytes({formatVersion: 1, extensions: []})]
 ]);
+const readText = async (directory, name) => (await (await directory.getFileHandle(name)).getFile()).text();
+async function writeText(directory, name, text) {
+    const file = await directory.getFileHandle(name, {create: true});
+    const writable = await file.createWritable();
+    await writable.write(new TextEncoder().encode(text));
+    await writable.close();
+}
 
 function memoryDirectory(name, onClose = () => {}) {
     const children = new Map();
@@ -98,4 +105,61 @@ test('rejects nonempty destinations and invalid paths, and rolls back files afte
     });
     await assert.rejects(createProjectFolder({directory: interrupted, files: seed, storage}), /write failed/);
     assert.equal(interrupted.children.size, 0);
+});
+
+test('confirmed overwrite replaces the project files and keeps unrelated root entries', async () => {
+    const directory = memoryDirectory('existing');
+    await writeText(directory, 'keep.txt', 'Keep this file');
+    await writeText(directory, 'project.source.json', 'old project');
+    await writeText(directory, 'extensions', 'file where the extensions directory goes');
+    const assets = await directory.getDirectoryHandle('assets', {create: true});
+    await writeText(assets, 'old.svg', 'old asset');
+    const stale = await assets.getDirectoryHandle('old', {create: true});
+    await writeText(stale, 'nested.svg', 'nested asset');
+
+    const source = await createProjectFolder({directory, files: seed, storage: {}, overwrite: true});
+    assert.deepEqual(source.project, project);
+    assert.equal(await readText(directory, 'keep.txt'), 'Keep this file');
+    assert.deepEqual(JSON.parse(await readText(directory, 'project.source.json')), project);
+    assert.equal(directory.children.has('extensions'), false);
+    assert.equal(assets.children.size, 0);
+});
+
+test('declining the Japanese overwrite prompt leaves the folder and the current project untouched', async t => {
+    const directory = memoryDirectory('existing');
+    await writeText(directory, 'project.source.json', 'old project');
+    const vm = {runtime: {storage: {}, getTargetForStage: () => stage, on() {}, off() {}}, on() {}, off() {}};
+    const stage = {};
+    const document = {
+        defaultView: {showDirectoryPicker: async () => directory, clearTimeout() {}, confirm(message) {
+            assert.equal(message, '指定されたフォルダは空ではありません。フォルダに保存されている内容が上書きされる場合があります。よろしいですか？');
+            return false;
+        }},
+        body: {append() {}}, createElement: () => ({dataset: {}, style: {}, setAttribute() {}, remove() {}})
+    };
+    const folder = mountProjectFolder({vm, document, locale: 'ja', host: {}});
+    t.after(() => folder.dispose());
+    assert.equal(projectFolderOverwriteWarning('ja'), '指定されたフォルダに保存されている内容は上書きされます');
+    assert.equal(await folder.createFromSnapshot({prepareFiles: async () => assert.fail('Cancelled before preparing the snapshot')}), 'cancelled');
+    assert.equal(await readText(directory, 'project.source.json'), 'old project');
+    assert.equal(folder.directory, null);
+});
+
+test('failed overwrite restores replaced project files and removed source entries', async () => {
+    let interrupted = false;
+    const directory = memoryDirectory('interrupted', name => {
+        if (interrupted && name === 'project.source.json') throw new Error('write failed');
+    });
+    await writeText(directory, 'project.source.json', 'old project');
+    await writeText(directory, 'sb3-source.json', 'old manifest');
+    const assets = await directory.getDirectoryHandle('assets', {create: true});
+    const stale = await assets.getDirectoryHandle('old', {create: true});
+    await writeText(stale, 'nested.svg', 'nested asset');
+    interrupted = true;
+
+    await assert.rejects(createProjectFolder({directory, files: seed, storage: {}, overwrite: true}), /write failed/);
+    assert.equal(await readText(directory, 'project.source.json'), 'old project');
+    assert.equal(await readText(directory, 'sb3-source.json'), 'old manifest');
+    assert.equal(await readText(await assets.getDirectoryHandle('old'), 'nested.svg'), 'nested asset');
+    assert.equal(directory.children.has('embedded-extensions.json'), false);
 });
