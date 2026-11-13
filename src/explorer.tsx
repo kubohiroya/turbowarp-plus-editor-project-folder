@@ -3,6 +3,7 @@ import {asyncDataLoaderFeature, hotkeysCoreFeature, selectionFeature} from '@hea
 import type {ItemInstance} from '@headless-tree/core';
 import {useTree} from '@headless-tree/react/react17';
 import {FolderError, isObject, manifestFile, projectFile} from './source.js';
+import {projectFolderOverwriteWarning} from './create-folder.js';
 import {followProjectFolder} from './folder-registry.js';
 import type {ExplorerMutation, FollowedFolder} from './folder-registry.js';
 import type {Json, Project} from './source.js';
@@ -52,6 +53,8 @@ const messages = {
     en: {
         label: 'Project folder', loading: 'Loading…', empty: 'This folder is empty.',
         noFolder: 'Open a project folder to show its files here.', open: 'Open Project Folder…',
+        create: 'Create Project Folder', creating: 'Creating project folder…',
+        createFailed: 'Could not create the project folder.',
         unavailable: 'File tabs are unavailable in this editor layout.',
         failed: 'This folder could not be read.', denied: 'Permission to read this folder was not granted.',
         separator: ', ',
@@ -68,6 +71,8 @@ const messages = {
     ja: {
         label: '作品フォルダ', loading: '読み込んでいます…', empty: 'このフォルダは空です。',
         noFolder: 'プロジェクトフォルダを開くと、ここにファイルを表示します。', open: 'プロジェクトフォルダを開く…',
+        create: 'プロジェクトフォルダを作成', creating: 'プロジェクトフォルダを作成しています…',
+        createFailed: 'プロジェクトフォルダを作成できませんでした。',
         unavailable: 'このエディターのレイアウトではファイルをタブで開けません。',
         failed: 'このフォルダを読み込めません。', denied: 'このフォルダを読む許可がありません。',
         separator: '、',
@@ -683,6 +688,8 @@ export type FollowFileStatuses = (directory: FileSystemDirectoryHandle,
 type FolderViewProps = {
     vm: object;
     locale?: string;
+    /** Saves the current project to a local folder. */
+    createFolder?(): Promise<unknown>;
     marks?: FollowMarks;
     fileStatuses?: FollowFileStatuses;
     git?: FollowExplorerGit;
@@ -697,8 +704,22 @@ const readJson = async (directory: FileSystemDirectoryHandle, name: string): Pro
     JSON.parse(await (await (await directory.getFileHandle(name)).getFile()).text());
 
 function FolderView({vm, locale = 'en', marks: followMarks, fileStatuses: followStatuses, git: followGit,
-    openFile, readBaseline}: FolderViewProps) {
+    openFile, readBaseline, createFolder}: FolderViewProps) {
     const message = messagesFor(locale);
+    const [creating, setCreating] = React.useState(false);
+    const [createError, setCreateError] = React.useState('');
+    const create = async () => {
+        if (!createFolder || creating) return;
+        setCreating(true);
+        setCreateError('');
+        try {
+            await createFolder();
+        } catch {
+            setCreateError(message.createFailed);
+        } finally {
+            setCreating(false);
+        }
+    };
     const [{folder, directory, version}, setFollowed] = React.useState<{
         folder?: FollowedFolder; directory: FileSystemDirectoryHandle | null; version: number;
     }>({directory: null, version: 0});
@@ -752,8 +773,15 @@ function FolderView({vm, locale = 'en', marks: followMarks, fileStatuses: follow
     if (!directory) {
         return <div className={`${prefix}-empty`}>
             <style>{css}</style>
-            <p>{message.noFolder}</p>
-            <button type="button" onClick={() => folder.open(locale ?? 'en')}>{message.open}</button>
+            {createFolder ? <>
+                <p>{projectFolderOverwriteWarning(locale)}</p>
+                <button type="button" disabled={creating} onClick={() => void create()}>{message.create}</button>
+                {creating && <p role="status">{message.creating}</p>}
+                {createError && <p role="alert">{createError}</p>}
+            </> : <>
+                <p>{message.noFolder}</p>
+                <button type="button" onClick={() => folder.open(locale)}>{message.open}</button>
+            </>}
         </div>;
     }
     return <>
@@ -773,10 +801,11 @@ function FolderView({vm, locale = 'en', marks: followMarks, fileStatuses: follow
 /**
  * Renders the explorer of the project folder open for `vm`, for a side panel of the host: its files with what each is
  * for, and `marks` (such as the Git status) when given. It follows the folder as it opens, closes and saves; with no
- * folder open it offers Open Project Folder…, and it renders nothing while no project folder is mounted for `vm`.
+ * folder open it offers to create one when the host supplies a command, or to open an existing one.
+ * It renders nothing while no project folder is mounted for `vm`.
  * Pass the same `marks` function across renders, or the marks are followed again.
  */
 export function renderProjectFolderExplorer(createElement: (component: any, props: any, ...children: any[]) => any,
-    {vm, locale = 'en', marks, fileStatuses, git, openFile, readBaseline}: FolderViewProps) {
-    return createElement(FolderView, {vm, locale, marks, fileStatuses, git, openFile, readBaseline});
+    props: FolderViewProps) {
+    return createElement(FolderView, props);
 }
