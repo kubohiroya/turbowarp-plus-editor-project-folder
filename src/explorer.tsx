@@ -146,7 +146,8 @@ const prefix = 'twpf-explorer';
 const entryDragType = 'application/x-twpf-explorer-entry';
 // Colors come from the host's text color, so the tree follows light and dark themes.
 const css = `.${prefix}{font:inherit;color:inherit}
-.${prefix}-item{display:flex;align-items:center;gap:.4em;width:100%;box-sizing:border-box;margin:0;border:0;border-radius:3px;
+.${prefix}-item{display:grid;grid-template-columns:1em 20px minmax(0,1fr);align-items:center;gap:.2em .4em;
+width:100%;box-sizing:border-box;margin:0;border:0;border-radius:3px;
 padding-block:.15em;padding-inline-end:.4em;background:none;color:inherit;font:inherit;text-align:start;cursor:pointer;white-space:nowrap}
 .${prefix}-item:hover{background:rgba(128,128,128,.12)}
 .${prefix}-item[aria-selected="true"]{background:rgba(128,128,128,.24)}
@@ -156,6 +157,7 @@ padding-block:.15em;padding-inline-end:.4em;background:none;color:inherit;font:i
 .${prefix}-icon img{width:20px;height:20px;object-fit:contain;border-radius:2px;
 background:repeating-conic-gradient(rgba(128,128,128,.22) 0 25%,transparent 0 50%) 0 0/8px 8px}
 .${prefix}-icon img[hidden]{display:none}
+.${prefix}-label{grid-column:3;display:flex;align-items:center;gap:.4em;min-width:0}
 .${prefix}-filename{display:inline-flex;min-width:0}
 .${prefix}-name{overflow:hidden;text-overflow:ellipsis}
 .${prefix}-item[data-staged] .${prefix}-filename{font-weight:700}
@@ -164,7 +166,9 @@ background:repeating-conic-gradient(rgba(128,128,128,.22) 0 25%,transparent 0 50
 .${prefix}-item[data-revision="merged"] .${prefix}-filename{color:#17603e;color:light-dark(#17603e,#85e3ad)}
 .${prefix}-unsaved{flex:none}
 .${prefix}-mark{flex:none;font-size:.85em;padding:0 .3em;border:1px solid currentColor;border-radius:3px;opacity:.85}
-.${prefix}-description{overflow:hidden;text-overflow:ellipsis;opacity:.7;font-size:.9em}
+.${prefix}-description{grid-column:3;min-width:0;padding:.2em .4em;border-radius:3px;background:rgba(128,128,128,.12);
+color:inherit;color:color-mix(in srgb,currentColor 78%,transparent);font-size:.75em;line-height:1.4;
+white-space:normal;overflow-wrap:anywhere}
 .${prefix}-status{opacity:.7;font-style:italic;padding-block:.15em}
 .${prefix}-empty{padding:.5em}
 .${prefix}-empty p{margin:0 0 .6em}
@@ -567,7 +571,7 @@ function Explorer({directory, locale, descriptions, marks, fileStatuses, unsaved
             <button {...itemProps} key={item.getId()} type="button" aria-label={accessibleName}
                 className={`${prefix}-item${data?.kind === 'error' ? ` ${prefix}-error` : ''}`} style={indent(level)}
                 data-path={data?.path} data-staged={status?.staged ? '' : undefined} data-revision={status?.revision}
-                title={unsaved || status?.staged || status?.revision ? accessibleName : undefined}
+                title={accessibleName || undefined}
                 data-drop-directory={entry?.kind === 'directory' ? entry.path : entry ? parentPath(entry.path) : undefined}
                 data-drop-active={entry?.kind === 'directory' && drag === entry.path ? '' : undefined}
                 data-move-directory={entry?.kind === 'directory' ? entry.path : undefined}
@@ -584,11 +588,13 @@ function Explorer({directory, locale, descriptions, marks, fileStatuses, unsaved
                 } : itemProps.onKeyDown}>
                 <span className={`${prefix}-caret`} aria-hidden="true">{folder ? (expanded ? '▾' : '▸') : ''}</span>
                 {icon ? <Icon kind={icon} path={data!.path} readFile={icon === 'image' ? readFile : undefined} /> : null}
-                <span className={`${prefix}-filename`}>
-                    <span className={`${prefix}-name`}>{item.getItemName()}</span>
-                    {unsaved ? <span className={`${prefix}-unsaved`} aria-hidden="true">*</span> : null}
+                <span className={`${prefix}-label`}>
+                    <span className={`${prefix}-filename`}>
+                        <span className={`${prefix}-name`}>{item.getItemName()}</span>
+                        {unsaved ? <span className={`${prefix}-unsaved`} aria-hidden="true">*</span> : null}
+                    </span>
+                    {markLabel ? <span className={`${prefix}-mark`} aria-hidden="true">{markLabel}</span> : null}
                 </span>
-                {markLabel ? <span className={`${prefix}-mark`} aria-hidden="true">{markLabel}</span> : null}
                 {description ? <span className={`${prefix}-description`} aria-hidden="true">{description}</span> : null}
             </button>
         ];

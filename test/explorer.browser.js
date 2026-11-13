@@ -269,6 +269,42 @@ test('lists the folder with folders first and .git hidden, and loads a folder wh
     await expect(svg).toHaveCount(0);
 });
 
+test('places folder and file descriptions below their names in a narrow tree', async t => {
+    const page = await open(t);
+    await page.evaluate(async () => {
+        document.getElementById('root').style.width = '235px';
+        await window.renderExplorer('en');
+    });
+    const tree = page.getByRole('tree');
+    const assets = tree.getByRole('treeitem', {name: 'assets, Costume and sound files'});
+    await assets.click();
+    const asset = tree.getByRole('treeitem', {name: `${a}.svg, Stage · backdrop backdrop1, Cat · costume cat-a`});
+    const source = tree.getByRole('treeitem', {name: 'project.source.json, Modified, Project data'});
+    for (const item of [assets, asset, source]) {
+        const description = item.locator('.twpf-explorer-description');
+        await expect(description).toBeVisible();
+        await expect(description).toHaveCSS('background-color', 'rgba(128, 128, 128, 0.12)');
+        const layout = await item.evaluate(row => {
+            const label = row.querySelector('.twpf-explorer-label');
+            const description = row.querySelector('.twpf-explorer-description');
+            const labelBox = label.getBoundingClientRect();
+            const descriptionBox = description.getBoundingClientRect();
+            return {
+                below: descriptionBox.top >= labelBox.bottom,
+                aligned: descriptionBox.left === labelBox.left,
+                fontScale: parseFloat(getComputedStyle(description).fontSize) / parseFloat(getComputedStyle(label).fontSize),
+                fits: description.scrollWidth === description.clientWidth
+            };
+        });
+        assert.deepEqual(layout, {below: true, aligned: true, fontScale: 0.75, fits: true});
+    }
+    const description = asset.locator('.twpf-explorer-description');
+    assert.ok(await description.evaluate(element =>
+        element.getBoundingClientRect().height > 2 * parseFloat(getComputedStyle(element).lineHeight)));
+    await expect(asset).toHaveAttribute('title', `${a}.svg, Stage · backdrop backdrop1, Cat · costume cat-a`);
+    await expect(tree.locator('[data-path="README.md"] .twpf-explorer-description')).toHaveCount(0);
+});
+
 test('moves, expands and opens with the keyboard', async t => {
     const page = await open(t);
     await page.evaluate(() => window.renderExplorer('en'));
