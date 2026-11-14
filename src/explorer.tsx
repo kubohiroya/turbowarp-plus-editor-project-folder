@@ -806,7 +806,7 @@ export type FollowFileStatuses = (directory: FileSystemDirectoryHandle,
 type FolderViewProps = {
     vm: object;
     locale?: string;
-    /** Saves the current project to a new local folder. */
+    /** Saves the current project to a local folder. */
     createFolder?(): Promise<unknown>;
     marks?: FollowMarks;
     fileStatuses?: FollowFileStatuses;
@@ -929,8 +929,8 @@ function FolderView({vm, locale = 'en', marks: followMarks, fileStatuses: follow
 /**
  * Renders the explorer of the project folder open for `vm`, for a side panel of the host: its files with what each is
  * for, and `marks` (such as the Git status) when given. It follows the folder as it opens, closes and saves; with no
- * folder open it offers to create one when the host supplies a command, or to open an existing one. It renders
- * nothing while no project folder is mounted for `vm`.
+ * folder open it offers to create one when the host supplies a command, or to open an existing one.
+ * It renders nothing while no project folder is mounted for `vm`.
  * Pass the same `marks` function across renders, or the marks are followed again.
  */
 export function renderProjectFolderExplorer(createElement: (component: any, props: any, ...children: any[]) => any,
