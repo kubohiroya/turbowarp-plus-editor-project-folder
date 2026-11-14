@@ -92,7 +92,7 @@ test('rejects nonempty destinations and invalid paths, and rolls back files afte
     const storage = {};
     const nonempty = memoryDirectory('nonempty');
     await nonempty.getFileHandle('keep.txt', {create: true});
-    await assert.rejects(createProjectFolder({directory: nonempty, files: seed, storage}), {code: 'directoryNotEmpty'});
+    await assert.rejects(createProjectFolder({directory: nonempty, files: seed, storage}), {code: 'conflict'});
     assert.deepEqual([...nonempty.children.keys()], ['keep.txt']);
 
     const invalid = memoryDirectory('invalid');
