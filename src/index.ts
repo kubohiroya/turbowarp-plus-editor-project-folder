@@ -1,5 +1,6 @@
 import {FolderError} from './source.js';
 import {createFolderSession} from './session.js';
+import {isProjectFolderEmpty} from './create-folder.js';
 import {registerFolder} from './folder-registry.js';
 import type {FolderHost, FolderVM, PickerWindow} from './session.js';
 
@@ -8,7 +9,7 @@ export type {ReloadTarget} from './block-reload.js';
 export {followProjectFolder} from './folder-registry.js';
 export type {FollowedFolder} from './folder-registry.js';
 export type {DeserializeBlocks} from './script-reload.js';
-export {createProjectFolder} from './create-folder.js';
+export {createProjectFolder, projectFolderOverwriteWarning} from './create-folder.js';
 
 const messages = {
     en: {
@@ -261,16 +262,27 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
     return {
         openDirectory: (...args: Parameters<typeof session.openDirectory>) =>
             session.openDirectory(...args).finally(renderReload),
+        unsavedPaths: () => session.unsavedPaths(),
+        readUnsavedFile: (path: string) => session.readUnsavedFile(path),
+        subscribeEdits: (listener: () => void) => session.subscribeEdits(listener),
         save: () => session.save().finally(renderReload),
-        createFromSnapshot({prepareFiles, directory, current = () => true}: {
+        createFromSnapshot({prepareFiles, collectEdits, directory, current = () => true}: {
             prepareFiles: () => Promise<ReadonlyMap<string, Uint8Array>>;
+            collectEdits?: () => Promise<void>;
             directory?: FileSystemDirectoryHandle;
             current?: () => boolean;
         }) {
+            const message = locale.startsWith('ja') ?
+                '指定されたフォルダは空ではありません。フォルダに保存されている内容が上書きされる場合があります。よろしいですか？' :
+                'The selected folder is not empty. Contents in the folder may be overwritten. Continue?';
             return session.createFromSnapshot(async () => {
-                if (directory) return directory;
                 try {
-                    return await pickDirectory.call(view, {id: 'turbowarp-plus-project-folder', mode: 'readwrite'});
+                    const selected = directory ?? await pickDirectory.call(view, {id: 'turbowarp-plus-project-folder', mode: 'readwrite'});
+                    if (!current()) return null;
+                    const overwrite = !await isProjectFolderEmpty(selected);
+                    if (!current() || (overwrite && !view.confirm(message))) return null;
+                    await collectEdits?.();
+                    return current() ? {directory: selected, overwrite} : null;
                 } catch (error) {
                     if (error instanceof DOMException && error.name === 'AbortError') return null;
                     throw error;

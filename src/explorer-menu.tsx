@@ -5,7 +5,7 @@ export const actionMessages = (locale = 'en') => locale.toLowerCase().startsWith
     actions: 'ファイルとフォルダの操作', rename: '名前を変更…', renameTitle: '名前を変更', delete: '削除…', deleteTitle: '削除',
     createFolder: '新規フォルダを作成', folderName: 'フォルダ名', newName: '新しい名前', cancel: 'キャンセル',
     remove: (name: string, folder: boolean) => folder ? `「${name}」とその中身を削除しますか？` : `「${name}」を削除しますか？`,
-    stage: 'Git にステージ', unstage: 'Git のステージを解除',
+    stage: '次のコミットに含める', unstage: '次のコミットから外す',
     working: '処理中…', copyFailed: 'コピーできませんでした', filesOnly: 'ファイルをドロップしてください。',
     invalidName: 'この名前は使用できません。', exists: '同じ名前のファイルまたはフォルダがあります。',
     invalidDestination: 'このフォルダには移動できません。',

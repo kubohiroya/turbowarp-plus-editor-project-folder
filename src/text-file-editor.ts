@@ -120,6 +120,8 @@ type TextFileOptions = {
     readHandle(): Promise<FileSystemFileHandle>;
     readBaseline?(): Promise<FileBaseline | null>;
     close(): void;
+    hostSaveShortcut?: boolean;
+    onDirtyChange?(): void;
 };
 
 export function mountTextFile(parent: HTMLElement, options: TextFileOptions) {
@@ -199,15 +201,21 @@ export function mountTextFile(parent: HTMLElement, options: TextFileOptions) {
             common, mixed ? EditorState.lineSeparator.of('\n') : [], history(), drawSelection(), highlightSpecialChars(),
             highlightActiveLine(), EditorView.contentAttributes.of({'aria-label': options.path}),
             keymap.of([...defaultKeymap, ...historyKeymap]),
-            EditorView.updateListener.of(update => {if (update.docChanged) updateSaveState();})
+            EditorView.updateListener.of(update => {if (update.docChanged) updateSaveState(undefined, true);})
         ]
     });
     const dirty = () => !view.state.doc.eq(savedDoc);
     const serialize = () => bom + (newline === '\n' ? view.state.doc.toString() : view.state.doc.toString().replace(/\n/gu, newline));
 
-    function updateSaveState(text = saving ? message.saving : dirty() ? message.unsaved : '') {
-        saveButton.disabled = saving || !dirty();
+    let wasDirty = false;
+    function updateSaveState(text = saving ? message.saving : dirty() ? message.unsaved : '', contentChanged = false) {
+        const isDirty = dirty();
+        saveButton.disabled = saving || !isDirty;
         setStatus(status, text);
+        if (isDirty !== wasDirty || contentChanged && isDirty) {
+            wasDirty = isDirty;
+            options.onDirtyChange?.();
+        }
     }
 
     async function unchanged(handle: FileSystemFileHandle) {
@@ -334,6 +342,8 @@ export function mountTextFile(parent: HTMLElement, options: TextFileOptions) {
     };
     panel.addEventListener('keydown', event => {
         if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 's') return;
+        // Let the main window's save shortcut choose the target when the host manages it.
+        if (options.hostSaveShortcut && panel.ownerDocument === document) return;
         event.preventDefault();
         event.stopPropagation();
         void save();
@@ -342,6 +352,9 @@ export function mountTextFile(parent: HTMLElement, options: TextFileOptions) {
     showDiff(false);
     updateSaveState();
     return {
+        save,
+        isDirty: dirty,
+        readUnsaved: () => !disposed && dirty() ? encoder.encode(serialize()) : undefined,
         requestClose() {
             if (!saving && (!dirty() || browser?.confirm(message.close))) options.close();
         },

@@ -3,6 +3,7 @@ import {asyncDataLoaderFeature, hotkeysCoreFeature, selectionFeature} from '@hea
 import type {ItemInstance} from '@headless-tree/core';
 import {useTree} from '@headless-tree/react/react17';
 import {FolderError, isObject, manifestFile, projectFile} from './source.js';
+import {projectFolderOverwriteWarning} from './create-folder.js';
 import {followProjectFolder} from './folder-registry.js';
 import type {ExplorerMutation, FollowedFolder} from './folder-registry.js';
 import type {Json, Project} from './source.js';
@@ -38,6 +39,8 @@ export type ProjectFolderExplorerProps = {
     unsavedPaths?: ReadonlySet<string>;
     /** Changes after the folder contents have been saved or reloaded. */
     refreshKey?: number;
+    /** Case-insensitive search by file name or relative path. */
+    query?: string;
     /** Called when a file is opened with Enter, Space or a click. */
     onOpen?(entry: ExplorerEntry): void;
     /** The tree's accessible name. Defaults to "Project folder". */
@@ -50,13 +53,16 @@ export type ProjectFolderExplorerProps = {
 
 const messages = {
     en: {
-        label: 'Project folder', loading: 'Loading…', empty: 'This folder is empty.',
+        label: 'Project folder', loading: 'Loading…', empty: 'This folder is empty.', noMatches: 'No matching files.',
+        results: 'Matching files',
         noFolder: 'Open a project folder to show its files here.', open: 'Open Project Folder…',
+        create: 'Create Project Folder', creating: 'Creating project folder…',
+        createFailed: 'Could not create the project folder.',
         unavailable: 'File tabs are unavailable in this editor layout.',
         failed: 'This folder could not be read.', denied: 'Permission to read this folder was not granted.',
         separator: ', ',
-        marks: {added: 'Added', modified: 'Modified', deleted: 'Deleted', untracked: 'Untracked'},
-        unsaved: 'Unsaved changes', staged: 'Staged',
+        marks: {added: 'New file', modified: 'Saved, not committed', deleted: 'Deleted', untracked: 'Untracked'},
+        unsaved: 'Unsaved changes', staged: 'Added to Git index',
         revisions: {committed: 'Committed', pushed: 'Pushed', merged: 'Pull request merged'},
         project: 'Project data', manifest: 'Folder manifest', extensions: 'Embedded extensions',
         assetsDirectory: 'Costume and sound files', extensionsDirectory: 'Extension files',
@@ -66,13 +72,16 @@ const messages = {
         stageSound: (name: string) => `Stage · sound ${name}`
     },
     ja: {
-        label: '作品フォルダ', loading: '読み込んでいます…', empty: 'このフォルダは空です。',
+        label: '作品フォルダ', loading: '読み込んでいます…', empty: 'このフォルダは空です。', noMatches: '該当するファイルはありません。',
+        results: '検索結果',
         noFolder: 'プロジェクトフォルダを開くと、ここにファイルを表示します。', open: 'プロジェクトフォルダを開く…',
+        create: 'プロジェクトフォルダを作成', creating: 'プロジェクトフォルダを作成しています…',
+        createFailed: 'プロジェクトフォルダを作成できませんでした。',
         unavailable: 'このエディターのレイアウトではファイルをタブで開けません。',
         failed: 'このフォルダを読み込めません。', denied: 'このフォルダを読む許可がありません。',
         separator: '、',
-        marks: {added: '追加', modified: '変更', deleted: '削除', untracked: '未追跡'},
-        unsaved: '未保存の変更あり', staged: 'ステージ済み',
+        marks: {added: '新しいファイル', modified: '保存済・未コミットの変更', deleted: '削除', untracked: '未追跡'},
+        unsaved: '未保存の変更あり', staged: 'Git のインデックスに追加済み',
         revisions: {committed: 'コミット済み', pushed: 'プッシュ済み', merged: 'PR マージ済み'},
         project: '作品データ', manifest: '作品フォルダの目録', extensions: '埋め込み拡張の一覧',
         assetsDirectory: 'コスチュームと音のファイル', extensionsDirectory: '拡張のファイル',
@@ -131,7 +140,7 @@ export function describeProjectFolder(project: Project, locale?: string, {manife
     return descriptions;
 }
 
-type ExplorerNode = {name: string; path: string; kind: 'file' | 'directory' | 'error'; message?: string};
+type ExplorerNode = {name: string; path: string; kind: 'file' | 'directory' | 'error'; deleted?: boolean; message?: string};
 type Message = typeof messages.en;
 const rootId = '/';
 // '\0' cannot appear in a file name, so the error row never collides with a real entry.
@@ -149,6 +158,10 @@ const css = `.${prefix}{font:inherit;color:inherit}
 .${prefix}-item{display:grid;grid-template-columns:1em 20px minmax(0,1fr);align-items:center;gap:.2em .4em;
 width:100%;box-sizing:border-box;margin:0;border:0;border-radius:3px;
 padding-block:.15em;padding-inline-end:.4em;background:none;color:inherit;font:inherit;text-align:start;cursor:pointer;white-space:nowrap}
+.${prefix}-search-result{display:block;width:100%;text-align:start;color:inherit;font:inherit;background:transparent;
+border:0;border-radius:3px;padding:.35em .5em;overflow-wrap:anywhere;cursor:pointer}
+.${prefix}-search-result:hover{background:rgba(128,128,128,.12)}
+.${prefix}-search-result:focus-visible{outline:2px solid currentColor;outline-offset:-2px}
 .${prefix}-item:hover{background:rgba(128,128,128,.12)}
 .${prefix}-item[aria-selected="true"]{background:rgba(128,128,128,.24)}
 .${prefix}-item:focus-visible{outline:2px solid currentColor;outline-offset:-2px}
@@ -160,12 +173,14 @@ background:repeating-conic-gradient(rgba(128,128,128,.22) 0 25%,transparent 0 50
 .${prefix}-label{grid-column:3;display:flex;align-items:center;gap:.4em;min-width:0}
 .${prefix}-filename{display:inline-flex;min-width:0}
 .${prefix}-name{overflow:hidden;text-overflow:ellipsis}
-.${prefix}-item[data-staged] .${prefix}-filename{font-weight:700}
-.${prefix}-item[data-revision="committed"] .${prefix}-filename{color:#174b9d;color:light-dark(#174b9d,#91c1ff)}
-.${prefix}-item[data-revision="pushed"] .${prefix}-filename{color:#67369a;color:light-dark(#67369a,#dfafff)}
-.${prefix}-item[data-revision="merged"] .${prefix}-filename{color:#17603e;color:light-dark(#17603e,#85e3ad)}
-.${prefix}-unsaved{flex:none}
-.${prefix}-mark{flex:none;font-size:.85em;padding:0 .3em;border:1px solid currentColor;border-radius:3px;opacity:.85}
+.${prefix}-marker{flex:none;white-space:pre}
+.${prefix}-item[data-staged] .${prefix}-name, .${prefix}-search-result[data-staged] .${prefix}-name,
+.${prefix}-name[data-git-change="modified"], .${prefix}-name[data-git-change="added"]{font-weight:700}
+.${prefix}-name[data-revision="committed"]{color:#174b9d;color:light-dark(#174b9d,#91c1ff)}
+.${prefix}-name[data-revision="pushed"]{color:#67369a;color:light-dark(#67369a,#dfafff)}
+.${prefix}-name[data-revision="merged"]{color:#17603e;color:light-dark(#17603e,#85e3ad)}
+.${prefix}-name[data-git-change="deleted"]{text-decoration:line-through}
+.${prefix}-item[aria-disabled="true"], .${prefix}-search-result:disabled{cursor:default}
 .${prefix}-description{grid-column:3;min-width:0;padding:.2em .4em;border-radius:3px;background:rgba(128,128,128,.12);
 color:inherit;color:color-mix(in srgb,currentColor 78%,transparent);font-size:.75em;line-height:1.4;
 white-space:normal;overflow-wrap:anywhere}
@@ -259,6 +274,100 @@ function Icon({kind, path, readFile}: {kind: IconKind; path: string; readFile?: 
     );
 }
 
+function FileStatusMarkers({unsaved, change}: {unsaved?: boolean; change?: ExplorerMark}) {
+    return <>
+        {unsaved && <span className={`${prefix}-marker`} data-tw-plus-unsaved-marker aria-hidden="true">{' *'}</span>}
+        {change === 'untracked' && <span className={`${prefix}-marker`} aria-hidden="true">{' ✨'}</span>}
+    </>;
+}
+
+function fileStatusLabels(message: ReturnType<typeof messagesFor>, unsaved: boolean | undefined,
+    status: ExplorerFileStatus | undefined, change: ExplorerMark | undefined) {
+    return [unsaved && message.unsaved, status?.staged && message.staged,
+        status?.revision && message.revisions[status.revision], change && message.marks[change]];
+}
+
+function deletedPaths(fileStatuses: ProjectFolderExplorerProps['fileStatuses'], marks: ProjectFolderExplorerProps['marks']) {
+    const paths = new Set<string>();
+    for (const [path, mark] of marks ?? []) if (mark === 'deleted') paths.add(path);
+    for (const [path, status] of fileStatuses ?? []) {
+        if (status.change === 'deleted') paths.add(path);
+        else paths.delete(path);
+    }
+    return paths;
+}
+
+function deletedChildren(paths: ReadonlySet<string>) {
+    const folders = new Map<string, Map<string, ExplorerNode>>();
+    for (const path of paths) {
+        const parts = path.split('/');
+        let parent = rootId;
+        for (const [index, name] of parts.entries()) {
+            const child = parent === rootId ? name : parent + '/' + name;
+            const kind = index === parts.length - 1 ? 'file' : 'directory';
+            let children = folders.get(parent);
+            if (!children) folders.set(parent, children = new Map());
+            children.set(child, {name, path: child, kind, deleted: true});
+            parent = child;
+        }
+    }
+    return folders;
+}
+
+function FileSearch({directory, query, locale, refreshKey, marks, fileStatuses, unsavedPaths, onOpen}:
+    ProjectFolderExplorerProps & {query: string}) {
+    const message = messagesFor(locale);
+    const [index, setIndex] = React.useState<{files: ExplorerEntry[]; failed: boolean}>();
+    React.useEffect(() => {
+        let current = true;
+        setIndex(undefined);
+        const files: ExplorerEntry[] = [];
+        let failed = false;
+        const walk = async (folder: FileSystemDirectoryHandle, base: string) => {
+            try {
+                for await (const entry of (folder as IterableDirectory).values()) {
+                    if (!current) return;
+                    if (entry.name.toLowerCase() === '.git') continue;
+                    const path = base + entry.name;
+                    if (entry.kind === 'directory') await walk(entry as FileSystemDirectoryHandle, path + '/');
+                    else files.push({path, name: entry.name, kind: 'file'});
+                }
+            } catch {
+                failed = true;
+            }
+        };
+        void walk(directory, '').then(() => {
+            if (current) setIndex({files, failed});
+        });
+        return () => {current = false;};
+    }, [directory, refreshKey]);
+
+    const paths = deletedPaths(fileStatuses, marks);
+    const files = new Map(index?.files.map(entry => [entry.path, entry]));
+    for (const path of paths) {
+        if (!files.has(path)) files.set(path, {name: path.split('/').pop()!, path, kind: 'file'});
+    }
+    const matches = [...files.values()].filter(entry => entry.path.toLowerCase().includes(query))
+        .sort((a, b) => a.path.localeCompare(b.path, locale, {numeric: true}));
+    return <div className={prefix} role="group" aria-label={message.results}>
+        {matches?.map(entry => {
+            const unsaved = unsavedPaths?.has(entry.path);
+            const status = fileStatuses?.get(entry.path);
+            const change = status?.change ?? marks?.get(entry.path);
+            const accessibleName = [entry.path, ...fileStatusLabels(message, unsaved, status, change)]
+                .filter(Boolean).join(message.separator);
+            return <button key={entry.path} type="button" className={`${prefix}-search-result`}
+                aria-label={accessibleName} title={accessibleName} data-staged={status?.staged ? '' : undefined}
+                data-revision={status?.revision} disabled={paths.has(entry.path)} onClick={() => onOpen?.(entry)}>
+                <span className={`${prefix}-name`} data-git-change={change} data-revision={status?.revision}>{entry.path}</span>
+                <FileStatusMarkers unsaved={unsaved} change={change}/>
+            </button>;
+        })}
+        {!index ? <p role="status">{message.loading}</p> : index.failed ? <p role="status">{message.failed}</p> :
+            !matches?.length && <p role="status">{message.noMatches}</p>}
+    </div>;
+}
+
 function Explorer({directory, locale, descriptions, marks, fileStatuses, unsavedPaths, refreshKey,
     onOpen, label, mutate, git, isCurrent}: ProjectFolderExplorerProps) {
     const message = messagesFor(locale);
@@ -298,6 +407,10 @@ function Explorer({directory, locale, descriptions, marks, fileStatuses, unsaved
         }
         return handle.getFile();
     };
+    const deleted = React.useMemo(() => deletedChildren(deletedPaths(fileStatuses, marks)), [fileStatuses, marks]);
+    const compareNodes = (a: ExplorerNode, b: ExplorerNode) =>
+        (a.kind === 'directory' ? 0 : 1) - (b.kind === 'directory' ? 0 : 1) ||
+        collator.compare(a.name, b.name) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
     const tree = useTree<ExplorerNode>({
         rootItemId: rootId,
         initialState: {expandedItems: [], selectedItems: [], focusedItem: null},
@@ -306,7 +419,7 @@ function Explorer({directory, locale, descriptions, marks, fileStatuses, unsaved
         createLoadingItemData: () => ({name: '', path: '', kind: 'file'}),
         onPrimaryAction: item => {
             const data = item.getItemData();
-            if (data?.kind === 'file') onOpen?.({path: data.path, name: data.name, kind: 'file'});
+            if (data?.kind === 'file' && !data.deleted && (fileStatuses?.get(data.path)?.change ?? marks?.get(data.path)) !== 'deleted') onOpen?.({path: data.path, name: data.name, kind: 'file'});
         },
         onLoadedChildren: id => {if (id === rootId) setRootLoaded(true);},
         dataLoader: {
@@ -324,24 +437,25 @@ function Explorer({directory, locale, descriptions, marks, fileStatuses, unsaved
                 }
             },
             getChildrenWithData: async id => {
+                const base = id === rootId ? '' : `${id}/`;
+                const missingChildren = deleted.get(id);
+                const nodes = new Map(missingChildren);
                 try {
                     const handle = await directoryAt(id);
-                    const base = id === rootId ? '' : `${id}/`;
-                    const nodes: ExplorerNode[] = [];
                     for await (const entry of (handle as IterableDirectory).values()) {
                         if (entry.name.toLowerCase() === '.git') continue;
                         const path = base + entry.name;
                         if (entry.kind === 'directory') handles.set(path, entry as FileSystemDirectoryHandle);
                         else files.set(path, entry as FileSystemFileHandle);
-                        nodes.push({name: entry.name, path, kind: entry.kind});
+                        nodes.set(path, {name: entry.name, path, kind: entry.kind});
                     }
-                    loadedFolders.add(id);
-                    nodes.sort((a, b) => (a.kind === 'directory' ? 0 : 1) - (b.kind === 'directory' ? 0 : 1) ||
-                        collator.compare(a.name, b.name) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-                    return nodes.map(data => ({id: data.path, data}));
                 } catch (error) {
-                    return [{id: errorId(id), data: {name: failure(error, message), path: '', kind: 'error'}}];
+                    if (!missingChildren || (error as DOMException).name !== 'NotFoundError') {
+                        return [{id: errorId(id), data: {name: failure(error, message), path: '', kind: 'error'}}];
+                    }
                 }
+                loadedFolders.add(id);
+                return [...nodes.values()].sort(compareNodes).map(data => ({id: data.path, data}));
             }
         },
         features: [asyncDataLoaderFeature, selectionFeature, hotkeysCoreFeature]
@@ -352,12 +466,18 @@ function Explorer({directory, locale, descriptions, marks, fileStatuses, unsaved
         tree.setMounted(true);
         return () => tree.setMounted(false);
     }, [tree]);
-    const lastRefresh = React.useRef(refreshKey);
+    const lastRefresh = React.useRef({refreshKey, deleted});
     React.useEffect(() => {
-        if (lastRefresh.current === refreshKey) return;
-        lastRefresh.current = refreshKey;
-        void Promise.all([...loadedFolders].map(id => tree.getItemInstance(id).invalidateChildrenIds(true)));
-    }, [tree, loadedFolders, refreshKey]);
+        const previous = lastRefresh.current;
+        lastRefresh.current = {refreshKey, deleted};
+        const affected = [...loadedFolders].filter(id => {
+            if (previous.refreshKey !== refreshKey) return true;
+            const before = previous.deleted.get(id);
+            const after = deleted.get(id);
+            return before?.size !== after?.size || [...after ?? []].some(([path, node]) => before?.get(path)?.kind !== node.kind);
+        });
+        void Promise.all(affected.map(id => tree.getItemInstance(id).invalidateChildrenIds(true)));
+    }, [tree, loadedFolders, refreshKey, deleted]);
 
     const errorText = (error: unknown) => {
         if (error instanceof ExplorerFileError) return actions[error.code];
@@ -550,27 +670,27 @@ function Explorer({directory, locale, descriptions, marks, fileStatuses, unsaved
     };
     const renderItem = (item: ItemInstance<ExplorerNode>) => {
         const data = item.getItemData();
-        const entry: ExplorerEntry | undefined = data?.path && data.kind !== 'error' ?
-            {path: data.path, name: data.name, kind: data.kind} : undefined;
         const itemProps = item.getProps();
         const level = item.getItemMeta().level;
         const folder = item.isFolder();
         const expanded = folder && item.isExpanded();
         const status = data?.kind === 'file' ? fileStatuses?.get(data.path) : undefined;
         const unsaved = data?.kind === 'file' && unsavedPaths?.has(data.path);
-        const mark = status?.change ?? (data && data.kind !== 'error' ? marks?.get(data.path) : undefined);
-        const markLabel = mark ? message.marks[mark] : '';
+        const change = data?.deleted ? 'deleted' : status?.change ?? (data?.kind === 'file' ? marks?.get(data.path) : undefined);
+        const entry: ExplorerEntry | undefined = data?.path && data.kind !== 'error' && change !== 'deleted' ?
+            {path: data.path, name: data.name, kind: data.kind} : undefined;
         const description = data && data.kind !== 'error' ? descriptions?.get(data.path) : undefined;
         const icon = !data || data.kind === 'error' ? undefined :
             folder ? (expanded ? 'folder-open' : 'folder') : iconFor(data.name);
-        const accessibleName = [item.getItemName(), unsaved && message.unsaved, status?.staged && message.staged,
-            status?.revision && message.revisions[status.revision], markLabel, description].filter(Boolean).join(message.separator);
+        const accessibleName = [item.getItemName(), ...fileStatusLabels(message, unsaved, status, change), description]
+            .filter(Boolean).join(message.separator);
         const moveDestination = entry?.kind === 'directory' && move?.destinations.has(entry.path);
         const moveActive = moveDestination && drag === entry.path;
         const rows = [
             <button {...itemProps} key={item.getId()} type="button" aria-label={accessibleName}
                 className={`${prefix}-item${data?.kind === 'error' ? ` ${prefix}-error` : ''}`} style={indent(level)}
                 data-path={data?.path} data-staged={status?.staged ? '' : undefined} data-revision={status?.revision}
+                aria-disabled={change === 'deleted' && !folder ? true : undefined}
                 title={accessibleName || undefined}
                 data-drop-directory={entry?.kind === 'directory' ? entry.path : entry ? parentPath(entry.path) : undefined}
                 data-drop-active={entry?.kind === 'directory' && drag === entry.path ? '' : undefined}
@@ -587,13 +707,12 @@ function Explorer({directory, locale, descriptions, marks, fileStatuses, unsaved
                     else itemProps.onKeyDown?.(event);
                 } : itemProps.onKeyDown}>
                 <span className={`${prefix}-caret`} aria-hidden="true">{folder ? (expanded ? '▾' : '▸') : ''}</span>
-                {icon ? <Icon kind={icon} path={data!.path} readFile={icon === 'image' ? readFile : undefined} /> : null}
+                {icon ? <Icon kind={icon} path={data!.path} readFile={icon === 'image' && change !== 'deleted' ? readFile : undefined} /> : null}
                 <span className={`${prefix}-label`}>
                     <span className={`${prefix}-filename`}>
-                        <span className={`${prefix}-name`}>{item.getItemName()}</span>
-                        {unsaved ? <span className={`${prefix}-unsaved`} aria-hidden="true">*</span> : null}
+                        <span className={`${prefix}-name`} data-git-change={change} data-revision={status?.revision}>{item.getItemName()}</span>
+                        <FileStatusMarkers unsaved={unsaved} change={change}/>
                     </span>
-                    {markLabel ? <span className={`${prefix}-mark`} aria-hidden="true">{markLabel}</span> : null}
                 </span>
                 {description ? <span className={`${prefix}-description`} aria-hidden="true">{description}</span> : null}
             </button>
@@ -672,7 +791,11 @@ const keyFor = (directory: FileSystemDirectoryHandle) => {
  */
 export function ProjectFolderExplorer(props: ProjectFolderExplorerProps) {
     // A new directory starts a new tree, so cached entries and expanded folders never leak between folders.
-    return <Explorer key={keyFor(props.directory)} {...props} />;
+    const query = props.query?.trim().toLowerCase();
+    return <React.Fragment key={keyFor(props.directory)}>
+        <div hidden={Boolean(query)}><Explorer {...props} /></div>
+        {query && <FileSearch {...props} query={query} />}
+    </React.Fragment>;
 }
 
 /** Follows marks for the files under `directory`, by path relative to it. Returns the function that stops it. */
@@ -683,8 +806,13 @@ export type FollowFileStatuses = (directory: FileSystemDirectoryHandle,
 type FolderViewProps = {
     vm: object;
     locale?: string;
+    /** Saves the current project to a new local folder. */
+    createFolder?(): Promise<unknown>;
     marks?: FollowMarks;
     fileStatuses?: FollowFileStatuses;
+    /** Reports unsaved text edits in open file tabs for the given folder. */
+    followFileEdits?(directory: FileSystemDirectoryHandle, update: (paths: readonly string[]) => void): () => void;
+    query?: string;
     git?: FollowExplorerGit;
     /** Opens a transient file tab in the host workspace. */
     openFile?(request: FilePreviewRequest): boolean;
@@ -697,8 +825,22 @@ const readJson = async (directory: FileSystemDirectoryHandle, name: string): Pro
     JSON.parse(await (await (await directory.getFileHandle(name)).getFile()).text());
 
 function FolderView({vm, locale = 'en', marks: followMarks, fileStatuses: followStatuses, git: followGit,
-    openFile, readBaseline}: FolderViewProps) {
+    openFile, readBaseline, query, followFileEdits, createFolder}: FolderViewProps) {
     const message = messagesFor(locale);
+    const [creating, setCreating] = React.useState(false);
+    const [createError, setCreateError] = React.useState('');
+    const create = async () => {
+        if (!createFolder || creating) return;
+        setCreating(true);
+        setCreateError('');
+        try {
+            await createFolder();
+        } catch {
+            setCreateError(message.createFailed);
+        } finally {
+            setCreating(false);
+        }
+    };
     const [{folder, directory, version}, setFollowed] = React.useState<{
         folder?: FollowedFolder; directory: FileSystemDirectoryHandle | null; version: number;
     }>({directory: null, version: 0});
@@ -743,6 +885,11 @@ function FolderView({vm, locale = 'en', marks: followMarks, fileStatuses: follow
         const stop = folder.subscribeEdits(schedule);
         return () => {stop(); clearTimeout(timer);};
     }, [folder, directory, version]);
+    const [fileEdits, setFileEdits] = React.useState<{directory: FileSystemDirectoryHandle; paths: readonly string[]}>();
+    React.useEffect(() => {
+        if (!directory || !followFileEdits) return;
+        return followFileEdits(directory, paths => setFileEdits({directory, paths}));
+    }, [directory, followFileEdits]);
     const [git, setGit] = React.useState<{directory: FileSystemDirectoryHandle; actions?: ExplorerGit}>();
     React.useEffect(() => {
         if (!directory || !followGit) return;
@@ -752,14 +899,23 @@ function FolderView({vm, locale = 'en', marks: followMarks, fileStatuses: follow
     if (!directory) {
         return <div className={`${prefix}-empty`}>
             <style>{css}</style>
-            <p>{message.noFolder}</p>
-            <button type="button" onClick={() => folder.open(locale ?? 'en')}>{message.open}</button>
+            {createFolder ? <>
+                <p>{projectFolderOverwriteWarning(locale)}</p>
+                <button type="button" disabled={creating} onClick={() => void create()}>{message.create}</button>
+                {creating && <p role="status">{message.creating}</p>}
+                {createError && <p role="alert">{createError}</p>}
+            </> : <>
+                <p>{message.noFolder}</p>
+                <button type="button" onClick={() => folder.open(locale)}>{message.open}</button>
+            </>}
         </div>;
     }
+    const unsavedPaths = new Set(unsaved?.directory === directory ? unsaved.paths : undefined);
+    if (fileEdits?.directory === directory) for (const path of fileEdits.paths) unsavedPaths.add(path);
     return <>
         <ProjectFolderExplorer directory={directory} locale={locale} descriptions={descriptions} marks={marks}
-            refreshKey={version} fileStatuses={statuses?.directory === directory ? statuses.paths : undefined}
-            unsavedPaths={unsaved?.directory === directory ? unsaved.paths : undefined}
+            refreshKey={version} query={query} fileStatuses={statuses?.directory === directory ? statuses.paths : undefined}
+            unsavedPaths={unsavedPaths}
             mutate={operation => folder.mutate(directory, operation)} isCurrent={() => folder.directory === directory}
             git={git?.directory === directory ? git.actions : undefined}
             onOpen={openFile && (entry => {
@@ -773,10 +929,11 @@ function FolderView({vm, locale = 'en', marks: followMarks, fileStatuses: follow
 /**
  * Renders the explorer of the project folder open for `vm`, for a side panel of the host: its files with what each is
  * for, and `marks` (such as the Git status) when given. It follows the folder as it opens, closes and saves; with no
- * folder open it offers Open Project Folder…, and it renders nothing while no project folder is mounted for `vm`.
+ * folder open it offers to create one when the host supplies a command, or to open an existing one. It renders
+ * nothing while no project folder is mounted for `vm`.
  * Pass the same `marks` function across renders, or the marks are followed again.
  */
 export function renderProjectFolderExplorer(createElement: (component: any, props: any, ...children: any[]) => any,
-    {vm, locale = 'en', marks, fileStatuses, git, openFile, readBaseline}: FolderViewProps) {
-    return createElement(FolderView, {vm, locale, marks, fileStatuses, git, openFile, readBaseline});
+    props: FolderViewProps) {
+    return createElement(FolderView, props);
 }

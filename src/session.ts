@@ -90,6 +90,13 @@ type SaveResult = {status: 'saved' | 'unchanged'; sourceRemoved: string[]};
 type SaveDirectory = {directory: FileSystemDirectoryHandle; files: Map<string, Uint8Array>; prefix: string};
 
 type VMAsset = {assetId: string; dataFormat: string; data?: Uint8Array};
+const encodeJson = (value: unknown) => new TextEncoder().encode(`${JSON.stringify(value, null, 2)}\n`);
+
+function saveManifest(source: FolderSource, added: Iterable<string>, removed: readonly string[]) {
+    const value = JSON.parse(new TextDecoder().decode(source.files.get(manifestFile))) as JsonObject;
+    const entries = (value.archiveEntries as string[]).filter(name => !removed.includes(name));
+    return encodeJson({...value, archiveEntries: [...entries, ...added]});
+}
 
 export function createFolderSession(vm: FolderVM, host: FolderHost) {
     let current: Session | null = null;
@@ -285,6 +292,29 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
             }
             return paths;
         },
+        /** The bytes the next save would write, null for a deletion, or undefined when no preview is available. */
+        readUnsavedFile(path: string): Uint8Array | null | undefined {
+            if (!current || busy) return;
+            try {
+                const {result, extensionSave, added, removed} = planSave(current, snapshot());
+                if (path === projectFile && result) return encodeJson(extensionSave.project);
+                if (path === extensionsFile && extensionSave.manifestChanged) return encodeJson(extensionSave.embedded);
+                if (path === manifestFile && (added.length || removed.length))
+                    return saveManifest(current.source, added.map(([name]) => name), removed);
+                if (path.startsWith('assets/')) {
+                    const name = path.slice('assets/'.length);
+                    if (removed.includes(name)) return null;
+                    const kind = added.find(([asset]) => asset === name)?.[1];
+                    if (kind) return assetData(name, kind) ?? undefined;
+                }
+                if (path.startsWith('extensions/')) {
+                    const name = path.slice('extensions/'.length);
+                    return extensionSave.removed.includes(name) ? null : extensionSave.writes.get(name);
+                }
+            } catch (error) {
+                if (!(error instanceof FolderError)) throw error;
+            }
+        },
         get canSave() {return current !== null;},
         get busy() {return busy;},
         get reloadState() {return reloadState();},
@@ -417,18 +447,23 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
         openDirectory(directory: FileSystemDirectoryHandle, confirmReplace: () => boolean): Promise<OpenResult> {
             return openFrom(() => Promise.resolve(directory), confirmReplace);
         },
-        createFromSnapshot(getDirectory: () => Promise<FileSystemDirectoryHandle | null>,
+        createFromSnapshot(selectDestination: () => Promise<{directory: FileSystemDirectoryHandle; overwrite: boolean} | null>,
             prepareFiles: () => Promise<ReadonlyMap<string, Uint8Array>>, isCurrent: () => boolean): Promise<OpenResult> {
             const stage = vm.runtime.getTargetForStage();
             let savedRevision: number | undefined;
             const currentProject = () => !disposed && vm.runtime.getTargetForStage() === stage &&
                 (savedRevision === undefined || revision === savedRevision) && isCurrent();
-            return openFrom(getDirectory, currentProject, async directory => {
+            let overwrite = false;
+            return openFrom(async () => {
+                const destination = await selectDestination();
+                overwrite = destination?.overwrite ?? false;
+                return destination?.directory ?? null;
+            }, currentProject, async directory => {
                 if (!currentProject()) return null;
                 savedRevision = revision;
                 const files = await prepareFiles();
                 if (!currentProject()) return null;
-                return createProjectFolder({directory, files, storage: vm.runtime.storage, current: currentProject});
+                return createProjectFolder({directory, files, storage: vm.runtime.storage, overwrite, current: currentProject});
             }, currentProject);
         },
         async save(): Promise<SaveResult> {
@@ -458,14 +493,7 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
                     notify();
                     return {status: 'unchanged', sourceRemoved: []};
                 }
-                const encoder = new TextEncoder();
-                let manifest: Uint8Array | null = null;
-                if (added.size || removed.length) {
-                    const value = JSON.parse(new TextDecoder().decode(source.files.get(manifestFile))) as JsonObject;
-                    const entries = (value.archiveEntries as string[]).filter(name => !removed.includes(name));
-                    value.archiveEntries = [...entries, ...added.keys()];
-                    manifest = encoder.encode(`${JSON.stringify(value, null, 2)}\n`);
-                }
+                const manifest = added.size || removed.length ? saveManifest(source, added.keys(), removed) : null;
                 const root = {directory: source.directory, files: source.files, prefix: ''};
                 const assets = {directory: await source.directory.getDirectoryHandle('assets', {create: true}), files: source.bytes, prefix: 'assets/'};
                 const extensions = {directory: await source.directory.getDirectoryHandle('extensions', {create: true}),
@@ -522,9 +550,9 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
                     for (const [name, data] of extensionSave.writes) await write(extensions, name, data);
                     if (manifest) await write(root, manifestFile, manifest);
                     if (extensionSave.manifestChanged) {
-                        await write(root, extensionsFile, encoder.encode(`${JSON.stringify(extensionSave.embedded, null, 2)}\n`));
+                        await write(root, extensionsFile, encodeJson(extensionSave.embedded));
                     }
-                    if (result) await write(root, projectFile, encoder.encode(`${JSON.stringify(extensionSave.project, null, 2)}\n`));
+                    if (result) await write(root, projectFile, encodeJson(extensionSave.project));
                 } catch (error) {
                     for (const restore of undo.reverse()) await restore().catch(() => {});
                     throw error;
