@@ -262,6 +262,9 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
     return {
         openDirectory: (...args: Parameters<typeof session.openDirectory>) =>
             session.openDirectory(...args).finally(renderReload),
+        unsavedPaths: () => session.unsavedPaths(),
+        readUnsavedFile: (path: string) => session.readUnsavedFile(path),
+        subscribeEdits: (listener: () => void) => session.subscribeEdits(listener),
         save: () => session.save().finally(renderReload),
         createFromSnapshot({prepareFiles, collectEdits, directory, current = () => true}: {
             prepareFiles: () => Promise<ReadonlyMap<string, Uint8Array>>;

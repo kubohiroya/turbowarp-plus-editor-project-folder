@@ -1,9 +1,22 @@
+interface FilePreviewSession {
+    requestClose(): void;
+    dispose(): void;
+    save?: () => Promise<void>;
+    readonly fileEdit?: {
+        directory: FileSystemDirectoryHandle;
+        path: string;
+        isDirty(): boolean;
+        readUnsaved(): Uint8Array | undefined;
+        save(): Promise<void>;
+    };
+}
+
 export interface FilePreviewRequest {
     reference: {providerId: string; documentId: string};
     filename: string;
     title: string;
     transient: true;
-    mount(element: HTMLElement, close: () => void): {requestClose(): void; dispose(): void};
+    mount(element: HTMLElement, close: () => void, onSaveAvailable?: () => void): FilePreviewSession;
 }
 
 export type FileBaseline = {branch: string | undefined; head: string | null; bytes: Uint8Array | null};
@@ -54,7 +67,7 @@ export function createFilePreview(directory: FileSystemDirectoryHandle, document
         filename: name,
         title: name,
         transient: true,
-        mount(element, close) {
+        mount(element, close, onSaveAvailable) {
             const message = locale.toLowerCase().startsWith('ja') ? messages.ja : messages.en;
             const {ownerDocument: document} = element;
             const panel = document.createElement('div');
@@ -69,7 +82,7 @@ export function createFilePreview(directory: FileSystemDirectoryHandle, document
             let disposed = false;
             let url: string | undefined;
             let media: HTMLMediaElement | undefined;
-            let textSession: ReturnType<FilePreviewRequest['mount']> | undefined;
+            let textSession: ReturnType<typeof import('./text-file-editor.js').mountTextFile> | undefined;
             const readHandle = () => fileAt(directory, path);
 
             const show = (node: HTMLElement) => status.replaceWith(node);
@@ -114,12 +127,17 @@ export function createFilePreview(directory: FileSystemDirectoryHandle, document
                 }
                 textSession = mountTextFile(panel, {
                     path, extension, content, locale, limit: textLimit, readHandle, close,
-                    readBaseline: readBaseline && (() => readBaseline(directory, path, textLimit))
+                    readBaseline: readBaseline && (() => readBaseline(directory, path, textLimit)),
+                    hostSaveShortcut: Boolean(onSaveAvailable), onDirtyChange: onSaveAvailable
                 });
                 status.remove();
+                onSaveAvailable?.();
             };
             void load().catch(() => {if (!disposed) status.textContent = message.failed;});
             return {
+                get save() {return textSession?.save;},
+                get fileEdit() {return textSession && {directory, path, isDirty: textSession.isDirty,
+                    readUnsaved: textSession.readUnsaved, save: textSession.save};},
                 requestClose() {if (textSession) textSession.requestClose(); else close();},
                 dispose() {
                     disposed = true;
