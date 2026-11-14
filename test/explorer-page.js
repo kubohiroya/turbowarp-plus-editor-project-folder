@@ -52,9 +52,9 @@ globalThis.renderFileStatuses = locale => render({directory: globalThis.droppedD
     unsavedPaths: new Set(['project.source.json']),
     fileStatuses: new Map([
         ['project.source.json', {change: 'modified', staged: true}],
-        ['README.md', {revision: 'committed'}],
-        ['sb3-source.json', {revision: 'pushed'}],
-        ['embedded-extensions.json', {revision: 'merged'}]
+        ['README.md', {change: 'untracked'}],
+        ['docs/old.txt', {change: 'deleted'}],
+        ['old-folder/old.txt', {change: 'deleted'}]
     ])
 });
 
