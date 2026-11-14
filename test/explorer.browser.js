@@ -216,27 +216,24 @@ test('creates folders and moves files and folder trees with drag feedback', asyn
 
 const names = async page => page.locator('[role="treeitem"] .twpf-explorer-name').allTextContents();
 
-test('shows unsaved and staged together and distinguishes file revisions in light and dark', async t => {
+test('shows unsaved and Git change markers in the file list', async t => {
     const page = await open(t);
     await page.evaluate(() => window.renderFileStatuses('ja'));
-    const file = page.getByRole('treeitem', {name: 'project.source.json、未保存の変更あり、ステージ済み、変更'});
-    await expect(file).toHaveAttribute('title', 'project.source.json、未保存の変更あり、ステージ済み、変更');
-    await expect(file.locator('.twpf-explorer-filename')).toHaveText('project.source.json*');
-    await expect(file.locator('.twpf-explorer-filename')).toHaveCSS('font-weight', '700');
+    const file = page.getByRole('treeitem', {name: 'project.source.json、未保存の変更あり、Git のインデックスに追加済み、保存済・未コミットの変更'});
+    assert.equal(await file.locator('[data-tw-plus-unsaved-marker]').textContent(), ' *');
+    await expect(file.locator('.twpf-explorer-name')).toHaveCSS('font-weight', '700');
+    await expect(page.getByRole('treeitem', {name: 'README.md、未追跡'}).locator('.twpf-explorer-marker')).toHaveText('✨');
+    await expect(page.getByRole('treeitem', {name: '.gitignore'}).locator('.twpf-explorer-marker')).toHaveCount(0);
+    await page.locator('[data-path="docs"]').click();
+    const deleted = page.locator('[data-path="docs/old.txt"]');
+    await expect(deleted).toHaveAccessibleName(/削除/);
+    await expect(deleted).toHaveAttribute('aria-disabled', 'true');
+    await expect(deleted.locator('.twpf-explorer-name')).toHaveCSS('text-decoration-line', 'line-through');
+    await page.locator('[data-path="old-folder"]').click();
+    await expect(page.locator('[data-path="old-folder/old.txt"] .twpf-explorer-name')).toHaveCSS('text-decoration-line', 'line-through');
     await file.focus();
     await page.keyboard.press('Enter');
     assert.equal(await page.evaluate(() => window.opened.at(-1).path), 'project.source.json');
-    const revisions = [
-        ['README.md、コミット済み', 'rgb(23, 75, 157)', 'rgb(145, 193, 255)'],
-        ['sb3-source.json、プッシュ済み', 'rgb(103, 54, 154)', 'rgb(223, 175, 255)'],
-        ['embedded-extensions.json、PR マージ済み', 'rgb(23, 96, 62)', 'rgb(133, 227, 173)']
-    ];
-    for (const [index, scheme] of ['light', 'dark'].entries()) {
-        await page.evaluate(value => {document.documentElement.style.colorScheme = value;}, scheme);
-        for (const [name, ...colors] of revisions) {
-            await expect(page.getByRole('treeitem', {name}).locator('.twpf-explorer-filename')).toHaveCSS('color', colors[index]);
-        }
-    }
 });
 
 test('lists the folder with folders first and .git hidden, and loads a folder when it is expanded', async t => {
@@ -250,7 +247,7 @@ test('lists the folder with folders first and .git hidden, and loads a folder wh
     const assets = tree.getByRole('treeitem', {name: 'assets, Costume and sound files'});
     await expect(assets).toHaveAttribute('aria-expanded', 'false');
     await expect(assets).toHaveAttribute('aria-level', '1');
-    await expect(tree.getByRole('treeitem', {name: 'project.source.json, Modified, Project data'})).toBeVisible();
+    await expect(tree.getByRole('treeitem', {name: 'project.source.json, Saved, not committed, Project data'})).toBeVisible();
     await expect(tree.getByRole('treeitem', {name: 'README.md, Untracked'})).toBeVisible();
     await expect(tree.getByRole('treeitem', {name: 'README.md, Untracked'})).not.toHaveAttribute('aria-expanded');
 
@@ -279,7 +276,7 @@ test('places folder and file descriptions below their names in a narrow tree', a
     const assets = tree.getByRole('treeitem', {name: 'assets, Costume and sound files'});
     await assets.click();
     const asset = tree.getByRole('treeitem', {name: `${a}.svg, Stage · backdrop backdrop1, Cat · costume cat-a`});
-    const source = tree.getByRole('treeitem', {name: 'project.source.json, Modified, Project data'});
+    const source = tree.getByRole('treeitem', {name: 'project.source.json, Saved, not committed, Project data'});
     for (const item of [assets, asset, source]) {
         const description = item.locator('.twpf-explorer-description');
         await expect(description).toBeVisible();
@@ -348,7 +345,7 @@ test('shows Japanese labels and descriptions', async t => {
     const page = await open(t);
     await page.evaluate(() => window.renderExplorer('ja'));
     const tree = page.getByRole('tree', {name: '作品フォルダ'});
-    await expect(tree.getByRole('treeitem', {name: 'project.source.json、変更、作品データ'})).toBeVisible();
+    await expect(tree.getByRole('treeitem', {name: 'project.source.json、保存済・未コミットの変更、作品データ'})).toBeVisible();
     await expect(tree.getByRole('treeitem', {name: 'sb3-source.json、作品フォルダの目録'})).toBeVisible();
     await expect(tree.getByRole('treeitem', {name: 'embedded-extensions.json、埋め込み拡張の一覧'})).toBeVisible();
     await expect(tree.getByRole('treeitem', {name: 'README.md、未追跡'})).toBeVisible();
