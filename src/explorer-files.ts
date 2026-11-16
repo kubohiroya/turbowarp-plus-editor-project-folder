@@ -1,3 +1,4 @@
+import {hiddenEntry} from './explorer-state.js';
 type DirectoryEntries = FileSystemDirectoryHandle & {values(): AsyncIterable<FileSystemHandle>};
 
 export class ExplorerFileError extends Error {
@@ -11,7 +12,7 @@ export function parentPath(path: string) {
 }
 
 function validateName(name: string) {
-    if (!name.trim() || name === '.' || name === '..' || name.toLowerCase() === '.git' || /[\\/\u0000]/u.test(name)) {
+    if (!name.trim() || name === '.' || name === '..' || hiddenEntry(name) || /[\\/\u0000]/u.test(name)) {
         throw new ExplorerFileError('invalidName');
     }
 }

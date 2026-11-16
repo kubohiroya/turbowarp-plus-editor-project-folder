@@ -2,6 +2,10 @@
 import * as React from 'react';
 import * as ReactDOM from 'react-dom';
 import {ProjectFolderExplorer, describeProjectFolder} from '../dist/explorer.js';
+import {readExplorerState, writeExplorerState} from '../dist/index.js';
+
+globalThis.explorerState = () => readExplorerState(globalThis.droppedDirectory);
+globalThis.applyExplorerState = state => writeExplorerState(globalThis.droppedDirectory, state, true);
 
 // Records object URLs, so a test can check that every thumbnail's URL is revoked.
 globalThis.objectUrls = {created: [], revoked: []};
