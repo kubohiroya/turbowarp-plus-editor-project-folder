@@ -215,6 +215,60 @@ test('creates folders and moves files and folder trees with drag feedback', asyn
     }), 'notes\0data');
 });
 
+test('copies folders and files dropped from the computer, with every level of the folder', async t => {
+    const page = await open(t, {withFolder: false});
+    await page.evaluate(() => window.renderWritableExplorer());
+    const outside = await mkdtemp(path.join(process.platform === 'darwin' ? '/private/tmp' : tmpdir(), 'twpf-drop-'));
+    t.after(() => rm(outside, {recursive: true, force: true}));
+    const folder = path.join(outside, '教材');
+    for (const name of ['sub/deep', 'empty', '.git']) await mkdir(path.join(folder, name), {recursive: true});
+    await writeFile(path.join(folder, 'top.txt'), 'top\n');
+    await writeFile(path.join(folder, 'sub/middle.txt'), 'middle\n');
+    await writeFile(path.join(folder, 'sub/deep/bottom.bin'), Buffer.from([0, 1, 2, 255]));
+    await writeFile(path.join(folder, '.git/HEAD'), 'ref: refs/heads/main\n');
+    await writeFile(path.join(outside, 'loose.txt'), 'loose\n');
+
+    const row = item => page.locator(`[data-path="${item}"]`);
+    await expect(row('destination')).toBeVisible();
+    const cdp = await page.context().newCDPSession(page);
+    const dropOn = async (item, files) => {
+        const box = await row(item).boundingBox();
+        assert.ok(box);
+        const [x, y] = [box.x + box.width / 2, box.y + box.height / 2];
+        for (const type of ['dragEnter', 'dragOver', 'drop']) {
+            await cdp.send('Input.dispatchDragEvent', {type, x, y, data: {items: [], files, dragOperationsMask: 1}});
+        }
+    };
+    await dropOn('destination', [folder, path.join(outside, 'loose.txt')]);
+    await expect(row('destination/教材')).toBeVisible();
+    await expect(row('destination/loose.txt')).toBeVisible();
+    await expect(page.getByRole('alert')).toHaveCount(0);
+    assert.deepEqual(await page.evaluate(async () => {
+        const list = async (directory, prefix = '') => {
+            const found = [];
+            for await (const handle of directory.values()) {
+                const name = `${prefix}${handle.name}`;
+                found.push(handle.kind === 'file' ? `${name}=${[...new Uint8Array(await (await handle.getFile()).arrayBuffer())].join(',')}` : `${name}/`);
+                if (handle.kind === 'directory') found.push(...await list(handle, `${name}/`));
+            }
+            return found.sort();
+        };
+        const root = await navigator.storage.getDirectory();
+        return list(await (await root.getDirectoryHandle('destination')).getDirectoryHandle('教材'));
+    }), ['empty/', 'sub/', 'sub/deep/', 'sub/deep/bottom.bin=0,1,2,255', 'sub/middle.txt=109,105,100,100,108,101,10',
+        'top.txt=116,111,112,10']);
+
+    // A folder of the same name is already there, so nothing is copied over it.
+    await writeFile(path.join(folder, 'top.txt'), 'changed\n');
+    await dropOn('destination', [folder]);
+    await expect(page.getByRole('alert')).toContainText('コピーできませんでした 教材 — 同じ名前のファイルまたはフォルダがあります。');
+    assert.equal(await page.evaluate(async () => {
+        const root = await navigator.storage.getDirectory();
+        const copied = await (await root.getDirectoryHandle('destination')).getDirectoryHandle('教材');
+        return (await (await copied.getFileHandle('top.txt')).getFile()).text();
+    }), 'top\n');
+});
+
 const names = async page => page.locator('[role="treeitem"] .twpf-explorer-name').allTextContents();
 
 test('shows unsaved and Git change markers in the file list', async t => {

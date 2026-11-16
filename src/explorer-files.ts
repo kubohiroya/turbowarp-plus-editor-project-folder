@@ -81,7 +81,39 @@ export async function copyExplorerFile(directory: FileSystemDirectoryHandle, fil
     await writeNewFile(directory, file.name, file, guard);
 }
 
-type CopiedEntry = {verify(): Promise<void>; removeSource(): Promise<void>};
+/**
+ * Copy a folder dropped from outside, such as from Finder or File Explorer, into `parent` with everything in it.
+ * Entries the tree hides, such as `.git`, are left out. If any part fails, the partial copy is removed.
+ */
+export async function copyExplorerDirectory(parent: FileSystemDirectoryHandle, source: FileSystemDirectoryHandle,
+    guard: () => void) {
+    validateName(source.name);
+    await assertUnused(parent, source.name);
+    guard();
+    const destination = await parent.getDirectoryHandle(source.name, {create: true});
+    try {
+        await copyDirectoryContents(source as DirectoryEntries, destination, guard);
+    } catch (error) {
+        await removeIncompleteCopy(parent, source.name);
+        throw error;
+    }
+}
+
+async function copyDirectoryContents(source: DirectoryEntries, destination: FileSystemDirectoryHandle, guard: () => void) {
+    for await (const handle of source.values()) {
+        if (hiddenEntry(handle.name)) continue;
+        validateName(handle.name);
+        if (handle.kind === 'file') {
+            await writeNewFile(destination, handle.name, await (handle as FileSystemFileHandle).getFile(), guard);
+            continue;
+        }
+        guard();
+        const directory = await destination.getDirectoryHandle(handle.name, {create: true});
+        await copyDirectoryContents(handle as DirectoryEntries, directory, guard);
+    }
+}
+
+type CopiedEntry ={verify(): Promise<void>; removeSource(): Promise<void>};
 
 async function copyEntry(sourceParent: FileSystemDirectoryHandle, source: FileSystemHandle, parent: FileSystemDirectoryHandle,
     name: string, guard: () => void): Promise<CopiedEntry> {

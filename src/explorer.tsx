@@ -9,7 +9,7 @@ import {hiddenEntry, readExplorerState, subscribeExplorerState, writeExplorerSta
 import type {ExplorerTreeState} from './explorer-state.js';
 import type {ExplorerMutation, FollowedFolder} from './folder-registry.js';
 import type {Json, Project} from './source.js';
-import {canMoveExplorerEntry, copyExplorerFile, createExplorerDirectory, deleteExplorerEntry, ExplorerFileError,
+import {canMoveExplorerEntry, copyExplorerDirectory, copyExplorerFile, createExplorerDirectory, deleteExplorerEntry, ExplorerFileError,
     explorerNameAvailable, moveExplorerEntry, parentPath, renameExplorerEntry, resolveExplorerDirectory} from './explorer-files.js';
 import {actionCss, actionMessages, ExplorerFileDialog, ExplorerMenu} from './explorer-menu.js';
 import type {FileAction, MenuAnchor} from './explorer-menu.js';
@@ -630,24 +630,38 @@ function Explorer({directory, locale, descriptions, marks, fileStatuses, unsaved
         const path = dropPath(event.target);
         const items = Array.from(event.dataTransfer.items);
         const problems: string[] = [];
-        const dropped = items.length ? items.flatMap(item => {
-            if (item.kind !== 'file') return [];
-            const entry = item.webkitGetAsEntry?.();
-            if (entry?.isDirectory) {
-                problems.push(`${entry.name} — ${actions.filesOnly}`);
-                return [];
-            }
-            const file = item.getAsFile();
-            return file ? [file] : [];
-        }) : Array.from(event.dataTransfer.files);
+        // A folder's handle has to be asked for while the drop event runs; the items are emptied after it.
+        type Dropped = {name: string; file: File} | {name: string; folder: Promise<FileSystemHandle | null>};
+        const dropped: Dropped[] =
+            items.length ? items.flatMap((item): Dropped[] => {
+                if (item.kind !== 'file') return [];
+                const entry = item.webkitGetAsEntry?.();
+                if (entry?.isDirectory) {
+                    const folder = (item as DataTransferItem & {
+                        getAsFileSystemHandle?(): Promise<FileSystemHandle | null>;
+                    }).getAsFileSystemHandle?.();
+                    if (folder) return [{name: entry.name, folder}];
+                    problems.push(`${entry.name} — ${actions.filesOnly}`);
+                    return [];
+                }
+                const file = item.getAsFile();
+                return file ? [{name: file.name, file}] : [];
+            }) : Array.from(event.dataTransfer.files, file => ({name: file.name, file}));
         void run(async () => {
             if (!dropped.length) return problems.join('\n') || actions.filesOnly;
             try {
                 await write(path, async (parent, guard) => {
-                    for (const file of dropped) {
+                    for (const item of dropped) {
                         guard();
-                        try {await copyExplorerFile(parent, file, guard);}
-                        catch (error) {problems.push(`${actions.copyFailed} ${file.name} — ${errorText(error)}`);}
+                        try {
+                            if ('file' in item) {
+                                await copyExplorerFile(parent, item.file, guard);
+                                continue;
+                            }
+                            const folder = await item.folder;
+                            if (folder?.kind !== 'directory') throw new DOMException('Not a folder', 'NotFoundError');
+                            await copyExplorerDirectory(parent, folder as FileSystemDirectoryHandle, guard);
+                        } catch (error) {problems.push(`${actions.copyFailed} ${item.name} — ${errorText(error)}`);}
                     }
                 });
             } finally {
