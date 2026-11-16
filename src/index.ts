@@ -4,7 +4,7 @@ import {isProjectFolderEmpty} from './create-folder.js';
 import {registerFolder} from './folder-registry.js';
 import type {FolderHost, FolderVM, PickerWindow} from './session.js';
 
-export type {Comparison, ComparisonRequest, ComparisonSection, FolderHost, FolderVM, OpenResult} from './session.js';
+export type {Comparison, ComparisonRequest, ComparisonSection, FolderHost, FolderScreenState, FolderVM, OpenResult} from './session.js';
 export type {ReloadTarget} from './block-reload.js';
 export {followProjectFolder} from './folder-registry.js';
 export type {FollowedFolder} from './folder-registry.js';
@@ -333,3 +333,5 @@ export function renderProjectFolderMenu(createElement: MenuElement, {
     };
     return createElement(MenuSection, null, item('open'), entry.session.canSave ? item('save') : null);
 }
+export {parseExplorerState, readExplorerState, subscribeExplorerState, writeExplorerState} from './explorer-state.js';
+export type {ExplorerTreeState} from './explorer-state.js';

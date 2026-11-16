@@ -73,13 +73,14 @@ async function makeFolder(t) {
     const folder = await mkdtemp(path.join(process.platform === 'darwin' ? '/private/tmp' : tmpdir(), 'twpf-explorer-'));
     t.after(() => rm(folder, {recursive: true, force: true}));
     const write = (name, value) => writeFile(path.join(folder, name), typeof value === 'string' || Buffer.isBuffer(value) ? value : JSON.stringify(value));
-    for (const name of ['assets', 'docs', 'extensions', '.git']) await mkdir(path.join(folder, name));
+    for (const name of ['assets', 'docs', 'extensions', '.git', '.tw-plus']) await mkdir(path.join(folder, name));
     await write('project.source.json', project);
     await write('sb3-source.json', manifest);
     await write('embedded-extensions.json', {formatVersion: 1, extensions: []});
     await write('README.md', '# Cat\n');
     await write('.gitignore', 'node_modules\n');
     await write('.git/HEAD', 'ref: refs/heads/main\n');
+    await write('.tw-plus/workspace.json', {version: 1, savedAt: 1, slices: {}});
     await write('docs/notes.txt', 'notes\n');
     await write('docs/scan.png', largeImage);
     await write('extensions/hello.js', 'export default class {}\n');
@@ -264,6 +265,31 @@ test('lists the folder with folders first and .git hidden, and loads a folder wh
     await assets.click();
     await expect(assets).toHaveAttribute('aria-expanded', 'false');
     await expect(svg).toHaveCount(0);
+});
+
+test('the tree comes back as it was left, and as a screen state sets it', async t => {
+    const page = await open(t);
+    await page.evaluate(() => window.renderExplorer('en'));
+    const tree = page.getByRole('tree', {name: 'Project folder'});
+    const assets = tree.getByRole('treeitem', {name: 'assets, Costume and sound files'});
+    await assets.click();
+    const svg = tree.getByRole('treeitem', {name: `${a}.svg, Stage · backdrop backdrop1, Cat · costume cat-a`});
+    await svg.click();
+    await expect(svg).toHaveAttribute('aria-selected', 'true');
+    assert.deepEqual(await page.evaluate(() => window.explorerState()), {expanded: ['assets'], selected: `assets/${a}.svg`});
+
+    // The side panel shows another view, and then the explorer again.
+    await page.evaluate(() => window.unmountExplorer());
+    await page.evaluate(() => window.renderExplorer('en'));
+    await expect(assets).toHaveAttribute('aria-expanded', 'true');
+    await expect(svg).toHaveAttribute('aria-selected', 'true');
+
+    // A project opened again with this folder applies the tree its screen state saved.
+    await page.evaluate(() => window.applyExplorerState({expanded: ['docs'], selected: 'docs/notes.txt'}));
+    const docs = tree.getByRole('treeitem', {name: 'docs'});
+    await expect(docs).toHaveAttribute('aria-expanded', 'true');
+    await expect(assets).toHaveAttribute('aria-expanded', 'false');
+    await expect(tree.getByRole('treeitem', {name: 'notes.txt'})).toHaveAttribute('aria-selected', 'true');
 });
 
 test('places folder and file descriptions below their names in a narrow tree', async t => {

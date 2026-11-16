@@ -5,6 +5,8 @@ import {useTree} from '@headless-tree/react/react17';
 import {FolderError, isObject, manifestFile, projectFile} from './source.js';
 import {projectFolderOverwriteWarning} from './create-folder.js';
 import {followProjectFolder} from './folder-registry.js';
+import {hiddenEntry, readExplorerState, subscribeExplorerState, writeExplorerState} from './explorer-state.js';
+import type {ExplorerTreeState} from './explorer-state.js';
 import type {ExplorerMutation, FollowedFolder} from './folder-registry.js';
 import type {Json, Project} from './source.js';
 import {canMoveExplorerEntry, copyExplorerFile, createExplorerDirectory, deleteExplorerEntry, ExplorerFileError,
@@ -327,7 +329,7 @@ function FileSearch({directory, query, locale, refreshKey, marks, fileStatuses, 
             try {
                 for await (const entry of (folder as IterableDirectory).values()) {
                     if (!current) return;
-                    if (entry.name.toLowerCase() === '.git') continue;
+                    if (hiddenEntry(entry.name)) continue;
                     const path = base + entry.name;
                     if (entry.kind === 'directory') await walk(entry as FileSystemDirectoryHandle, path + '/');
                     else files.push({path, name: entry.name, kind: 'file'});
@@ -408,12 +410,23 @@ function Explorer({directory, locale, descriptions, marks, fileStatuses, unsaved
         return handle.getFile();
     };
     const deleted = React.useMemo(() => deletedChildren(deletedPaths(fileStatuses, marks)), [fileStatuses, marks]);
+    const [remembered] = React.useState(() => readExplorerState(directory));
+    const remember = (change: Partial<ExplorerTreeState>) => {
+        const previous = readExplorerState(directory) ?? {expanded: []};
+        const next = {...previous, ...change};
+        if (!next.selected) delete next.selected;
+        writeExplorerState(directory, next);
+    };
     const compareNodes = (a: ExplorerNode, b: ExplorerNode) =>
         (a.kind === 'directory' ? 0 : 1) - (b.kind === 'directory' ? 0 : 1) ||
         collator.compare(a.name, b.name) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
     const tree = useTree<ExplorerNode>({
         rootItemId: rootId,
-        initialState: {expandedItems: [], selectedItems: [], focusedItem: null},
+        // The tree comes back as it was left, or as the folder's screen state saved it.
+        initialState: {expandedItems: [...remembered?.expanded ?? []],
+            selectedItems: remembered?.selected ? [remembered.selected] : [], focusedItem: remembered?.selected ?? null},
+        setExpandedItems: expanded => remember({expanded: expanded as string[]}),
+        setSelectedItems: selected => remember({selected: (selected as string[])[0]}),
         getItemName: item => item.getItemData()?.name ?? '',
         isItemFolder: item => item.getItemData()?.kind === 'directory',
         createLoadingItemData: () => ({name: '', path: '', kind: 'file'}),
@@ -443,7 +456,7 @@ function Explorer({directory, locale, descriptions, marks, fileStatuses, unsaved
                 try {
                     const handle = await directoryAt(id);
                     for await (const entry of (handle as IterableDirectory).values()) {
-                        if (entry.name.toLowerCase() === '.git') continue;
+                        if (hiddenEntry(entry.name)) continue;
                         const path = base + entry.name;
                         if (entry.kind === 'directory') handles.set(path, entry as FileSystemDirectoryHandle);
                         else files.set(path, entry as FileSystemFileHandle);
@@ -466,6 +479,13 @@ function Explorer({directory, locale, descriptions, marks, fileStatuses, unsaved
         tree.setMounted(true);
         return () => tree.setMounted(false);
     }, [tree]);
+    // A project opened again with this folder shows the tree its screen state saved.
+    React.useEffect(() => subscribeExplorerState(directory, state => {
+        tree.applySubStateUpdate('expandedItems', [...state.expanded]);
+        tree.applySubStateUpdate('selectedItems', state.selected ? [state.selected] : []);
+        tree.applySubStateUpdate('focusedItem', state.selected ?? null);
+        tree.rebuildTree();
+    }), [tree, directory]);
     const lastRefresh = React.useRef({refreshKey, deleted});
     React.useEffect(() => {
         const previous = lastRefresh.current;
