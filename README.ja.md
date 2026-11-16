@@ -10,13 +10,15 @@ TurboWarp Plus Editor で sb3-toolchain の作品フォルダ（展開ソース�
 - `renderProjectFolderMenu(createElement, props)` は既存の開く・保存コマンドをホストのファイルメニューに渡します。
 - 接続後の `openDirectory(handle, confirmReplace)` には、ホストが選択済みのディレクトリハンドルを渡せます。ファイルメニューと同じ作品検証・未保存編集の確認を経て開き、保存先にはその作品フォルダを使います。
 - 接続後の `directory` は、読み込んだ作品のフォルダーのハンドルです。別の作品を読み込むか、フォルダーとの接続を外すと `null` になります。ホストは作品を見分けるのに使えます。
-- `host.screenState` を渡すと、Editor の画面状態をフォルダーに保存します。渡すものは workbench の `installProjectScreenState` が返すものです。作品フォルダーは SB3 ではないので、状態は `.tw-plus/workspace.json` に入れます。フォルダーを開くと、作品を読み込む前にこれを読み、`prepareLoad(text)` で渡します。保存時は、作品が変わっていなくても `serialize()` の結果を書きます。保存時刻だけが違うときは書きません。読み書きに失敗しても、開く操作と保存は失敗にしません。セッションは `projectFolder` スライス（ツリーで開いたフォルダーと選択中の項目）も登録します。
+- `host.screenState` を渡すと、Editor の画面状態をフォルダーに保存します。渡すものは workbench の `installProjectScreenState` が返すものです。作品フォルダーは SB3 ではないので、状態は `.tw-plus/workspace.json` に入れます。フォルダーを開くと、作品を読み込む前にこれを読み、`prepareLoad(text)` で渡します。保存時は、作品が変わっていなくても `serialize()` の結果を書きます。保存時刻だけが違うときは書きません。読み書きに失敗しても、開く操作と保存は失敗にしません。セッションは `projectFolder` スライス（ツリーで開いたフォルダーと選択中の項目）も登録します。SB3 から作品フォルダを作るとき、sb3-toolchain（0.26.0 以降）が展開したスナップショットに `.tw-plus/workspace.json` があれば、そのままフォルダーに書くので、作ったフォルダーは同じ画面で開きます。スナップショットにないときは、上書きするフォルダーの古い `workspace.json` を消します。`.tw-plus` のほかのファイルは残します。
 
 ホストは VM、メニューコンポーネント、作品状態を扱うコールバックを渡します。メニューからフォルダを開くには、ブラウザーが File System Access のフォルダ選択に対応している必要があります。ブロック、変数・リスト、スプライトの位置や大きさなどの項目、モニター、組み込みの拡張機能の編集を作品データ（`project.source.json`）に保存し、作品の実行で変わった状態も含みます。スプライトの追加・削除・名前の変更と、コスチューム・音の追加・削除も保存します。新しいアセットのファイルを先に書き、`sb3-source.json` と作品データを書いてから、参照されなくなったアセットのファイルを消します。 [Editor #305](https://github.com/kubohiroya/turbowarp-plus-editor/issues/305) · [Editor #308](https://github.com/kubohiroya/turbowarp-plus-editor/issues/308)
 
 システムフォントと Web フォントの参照は作品データに保持し、埋め込みフォントは `assets/` に保存します。 [Editor #495](https://github.com/kubohiroya/turbowarp-plus-editor/issues/495)
 
 ## ブロックパレットの設定
+
+TurboWarp Plus Editor は、ブロックパレットの設定を画面状態（`.tw-plus/workspace.json`）に保存するようになりました。この節の形式 2 の読み書きは、それ以前に作られた作品フォルダのために残しています。
 
 展開ソース形式 2 の作品フォルダは、スプライト・背景ごとのブロックパレットの設定を `block-palette.json` に持ちます（[sb3-toolchain の形式 v2](https://github.com/kubohiroya/sb3-toolchain/blob/main/docs/ja/source-format-v2.md)）。開くときは、`project.source.json` のコメントにある参照 `block-palette:block-palette.json` を、SB3 と同じパレット設定のコメントの本文に戻して VM に読み込みます。
 
