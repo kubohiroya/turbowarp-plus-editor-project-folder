@@ -12,9 +12,24 @@ TurboWarp Plus Editor で sb3-toolchain の作品フォルダ（展開ソース�
 - 接続後の `directory` は、読み込んだ作品のフォルダーのハンドルです。別の作品を読み込むか、フォルダーとの接続を外すと `null` になります。ホストは作品を見分けるのに使えます。
 - `host.screenState` を渡すと、Editor の画面状態をフォルダーに保存します。渡すものは workbench の `installProjectScreenState` が返すものです。作品フォルダーは SB3 ではないので、状態は `.tw-plus/workspace.json` に入れます。フォルダーを開くと、作品を読み込む前にこれを読み、`prepareLoad(text)` で渡します。保存時は、作品が変わっていなくても `serialize()` の結果を書きます。保存時刻だけが違うときは書きません。読み書きに失敗しても、開く操作と保存は失敗にしません。セッションは `projectFolder` スライス（ツリーで開いたフォルダーと選択中の項目）も登録します。SB3 から作品フォルダを作るとき、sb3-toolchain（0.26.0 以降）が展開したスナップショットに `.tw-plus/workspace.json` があれば、そのままフォルダーに書くので、作ったフォルダーは同じ画面で開きます。スナップショットにないときは、上書きするフォルダーの古い `workspace.json` を消します。`.tw-plus` のほかのファイルは残します。
 
-ホストは VM、メニューコンポーネント、作品状態を扱うコールバックを渡します。メニューからフォルダを開くには、ブラウザーが File System Access のフォルダ選択に対応している必要があります。ブロック、変数・リスト、スプライトの位置や大きさなどの項目、モニター、組み込みの拡張機能の編集を作品データ（`project.source.json`）に保存し、作品の実行で変わった状態も含みます。スプライトの追加・削除・名前の変更と、コスチューム・音の追加・削除も保存します。新しいアセットのファイルを先に書き、`sb3-source.json` と作品データを書いてから、参照されなくなったアセットのファイルを消します。 [Editor #305](https://github.com/kubohiroya/turbowarp-plus-editor/issues/305) · [Editor #308](https://github.com/kubohiroya/turbowarp-plus-editor/issues/308)
+ホストは VM、メニューコンポーネント、作品状態を扱うコールバックを渡します。メニューからフォルダを開くには、ブラウザーが File System Access のフォルダ選択に対応しているか、[ブラウザー内の作品フォルダ](#ブラウザー内の作品フォルダ)を使える必要があります。ブロック、変数・リスト、スプライトの位置や大きさなどの項目、モニター、組み込みの拡張機能の編集を作品データ（`project.source.json`）に保存し、作品の実行で変わった状態も含みます。スプライトの追加・削除・名前の変更と、コスチューム・音の追加・削除も保存します。新しいアセットのファイルを先に書き、`sb3-source.json` と作品データを書いてから、参照されなくなったアセットのファイルを消します。 [Editor #305](https://github.com/kubohiroya/turbowarp-plus-editor/issues/305) · [Editor #308](https://github.com/kubohiroya/turbowarp-plus-editor/issues/308)
 
 システムフォントと Web フォントの参照は作品データに保持し、埋め込みフォントは `assets/` に保存します。 [Editor #495](https://github.com/kubohiroya/turbowarp-plus-editor/issues/495)
+
+## ブラウザー内の作品フォルダ
+
+Safari と Firefox にはフォルダ選択（`showDirectoryPicker`）がありません。これらのブラウザーでは、作品フォルダをブラウザーの中の保存領域（OPFS、Origin Private File System）に置きます。読み書きの処理はデバイス上のフォルダと同じです。 [Editor #660](https://github.com/kubohiroya/turbowarp-plus-editor/issues/660)
+
+- `mountProjectFolder` の `browserStorage` で使い方を選びます。
+  - `fallback`（既定）：フォルダ選択がないブラウザーでだけ使います。**プロジェクトフォルダを開く…** はブラウザー内の作品フォルダの一覧を開き、`createFromSnapshot` は新しい作品フォルダの名前を尋ねます（`title` で名前の初期値を渡せます）。
+  - `always`：フォルダ選択があるブラウザーでも使います。ファイルメニューに **ブラウザー内のプロジェクトフォルダを開く…** を足し、`projectFolderActions(vm).openBrowser` でも開けます。
+  - `off`：使いません。
+- 一覧のダイアログでは、作品フォルダを開く、ZIP で書き出す、削除することができます。保存領域の使用量と、ブラウザーが消さずに残すか（`persisted`）も表示します。閉じるボタンは X のアイコンで、名前は表示の言語に合わせます。
+- 作品フォルダは `turbowarp-plus/projects/<id>/` に置き、表示名と時刻は `turbowarp-plus/project-info/<id>.json` に置きます。作品フォルダの外に置くので、Git の管理対象には入りません。`projectPath` を指定すると、リポジトリのルートの下の作品フォルダ（例：`project`）を開けます。
+- 同じ作品フォルダへの保存は、`navigator.locks` で作品ごとに排他します。WebKit は `createWritable({mode: 'exclusive'})` を重ねても拒否しないので、タブ間の排他はロックで行います。保存すると一覧の更新時刻が変わります。
+- `openBrowserProjects(window)` は一覧・作成・削除・保存領域の状態を扱う口です。`chooseBrowserProject` は一覧のダイアログを、`exportBrowserProject` と `zipDirectory` は ZIP の書き出しを、ホストが直接使うためのものです。ZIP は圧縮せず、名前を UTF-8 で書きます。
+
+ブラウザーの中の作品フォルダは、サイトのデータを消したときや、しばらくサイトを使わなかったときに、ブラウザーが消すことがあります（Safari では 7 日間）。最初の作品フォルダを作るときに `navigator.storage.persist()` を求めますが、保証にはなりません。ZIP で書き出すか、Git で GitHub に送って残すようにダイアログで案内します。
 
 ## ブロックパレットの設定
 
@@ -61,7 +76,7 @@ TurboWarp Plus Editor は、ブロックパレットの設定を画面状態（`
 
 ## 開発
 
-Node.js 26 で `npm ci` と `npm test` を実行します。Vite で JavaScript、TypeScript で型宣言を生成します。ホストとの接続検証には `npm pack` で作る tarball を使います。`npm run test:browser` は、最小 editor runtime（`@kubohiroya/turbowarp-plus-editor-test-runtime`）の上で、フォルダの外部変更と本物の VM・ワークスペースとの結合を Chromium で試します。Editor が固定する VM と Scratch Blocks を使い、Editor のビルドは要りません。フォルダの一覧も、React 16.14 で実際の一時フォルダを表示して試します。`TWPF_EXPLORER_SCREENSHOT` にファイルのパスを入れると、その画面を保存します。
+Node.js 26 で `npm ci` と `npm test` を実行します。Vite で JavaScript、TypeScript で型宣言を生成します。ホストとの接続検証には `npm pack` で作る tarball を使います。`npm run test:browser` は、最小 editor runtime（`@kubohiroya/turbowarp-plus-editor-test-runtime`）の上で、フォルダの外部変更と本物の VM・ワークスペースとの結合を Chromium で試します。Editor が固定する VM と Scratch Blocks を使い、Editor のビルドは要りません。フォルダの一覧も、React 16.14 で実際の一時フォルダを表示して試します。`TWPF_EXPLORER_SCREENSHOT` にファイルのパスを入れると、その画面を保存します。ブラウザー内の作品フォルダは、フォルダ選択を外した Chromium と WebKit で、作成・保存・開き直し・ZIP の書き出し・削除を試します。WebKit は `npx playwright install webkit` で入れます。ZIP の単体テストと書き出しの確認には `python3` の `zipfile` を使います。
 
 Editor のヘッドレス統合テストは実ディスク上のフォルダを使い、選択画面の操作を差し替えます。OS のフォルダ選択画面を確認するときは、使い捨ての sb3-toolchain v1 作品を **ファイル → プロジェクトフォルダを開く…** から選び、読み書きを許可します。標準ブロックを変更し、**ファイル → プロジェクトフォルダに保存** を選びます。選んだフォルダの `project.source.json` が更新されたことを確かめ、同じフォルダを開き直して編集が反映されることを確認します。
 

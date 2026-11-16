@@ -12,11 +12,26 @@ This package opens and saves sb3-toolchain project folders (source formats 1 and
 - The mounted session's `directory` is the folder the loaded project came from. It becomes `null` once another project loads or the folder is detached, so a host can tell projects apart by it.
 - `host.screenState` keeps the Editor's screen state in the folder, as the workbench's `installProjectScreenState` provides it. A project folder is not an SB3, so the state goes into `.tw-plus/workspace.json`. Opening the folder reads it and passes it with `prepareLoad(text)` before the project loads. Saving writes `serialize()`, even when the project itself is unchanged, and skips the write when only the save time differs. A failure to read or write it never fails the open or the save. The session also registers the `projectFolder` slice: the expanded folders and the selected entry of the explorer. When a folder is created from an SB3, a `.tw-plus/workspace.json` in the snapshot sb3-toolchain (0.26.0 or later) unpacked is written into the folder as it is, so the new folder opens with the same screen. A snapshot without one removes the old `workspace.json` of the folder it overwrites, and keeps the other files in `.tw-plus`.
 
-The host supplies the VM, menu components, and project state callbacks. The browser must support the File System Access picker for the built-in open command. Save writes block, variable, list, sprite property, monitor and built-in extension edits to the project file, including state that changes while the project runs. Sprites can be added, removed and renamed, and costumes and sounds added or removed: new asset files are written first, then `sb3-source.json` and the project file, and asset files nothing refers to are deleted last. See [Editor issue #305](https://github.com/kubohiroya/turbowarp-plus-editor/issues/305) and [issue #308](https://github.com/kubohiroya/turbowarp-plus-editor/issues/308).
+The host supplies the VM, menu components, and project state callbacks. The built-in open command needs the File System Access folder picker or [project folders in the browser](#project-folders-in-the-browser). Save writes block, variable, list, sprite property, monitor and built-in extension edits to the project file, including state that changes while the project runs. Sprites can be added, removed and renamed, and costumes and sounds added or removed: new asset files are written first, then `sb3-source.json` and the project file, and asset files nothing refers to are deleted last. See [Editor issue #305](https://github.com/kubohiroya/turbowarp-plus-editor/issues/305) and [issue #308](https://github.com/kubohiroya/turbowarp-plus-editor/issues/308).
 
 The project file keeps system and web font references. Embedded font files are saved in `assets/`.
 
 Folders can contain embedded extension scripts and custom extension URLs. Opening a folder restores embedded scripts as data URLs and uses the Editor's extension review. Saving preserves unchanged extension files and metadata, and reports when replacing a script removes its recorded source. See [拡張機能](README.ja.md#拡張機能).
+
+## Project folders in the browser
+
+Safari and Firefox have no folder picker (`showDirectoryPicker`). In these browsers, project folders live in the browser's own storage, the origin private file system (OPFS). They are read and saved the same way as folders on the device. See [Editor issue #660](https://github.com/kubohiroya/turbowarp-plus-editor/issues/660).
+
+- `browserStorage` of `mountProjectFolder` chooses how they are used.
+  - `fallback` (default): only in browsers without the folder picker. **Open Project Folder…** lists the folders in the browser, and `createFromSnapshot` asks for the name of a new folder (`title` gives the initial name).
+  - `always`: also in browsers with the folder picker. The File menu gets **Open Project Folder in This Browser…**, and `projectFolderActions(vm).openBrowser` opens it too.
+  - `off`: never.
+- The dialog opens, exports as a ZIP, and deletes the folders. It shows how much storage is used and whether the browser keeps it (`persisted`). Its close button is an X icon named in the display language.
+- A folder lives at `turbowarp-plus/projects/<id>/`, and its name and times at `turbowarp-plus/project-info/<id>.json`, outside the folder, so Git never tracks them. With `projectPath`, the project folder can sit below the repository root, such as `project`.
+- Saves to the same folder are serialized per folder with `navigator.locks`. WebKit does not refuse a second `createWritable({mode: 'exclusive'})`, so the lock is what keeps tabs apart. A save updates the folder's time in the list.
+- `openBrowserProjects(window)` lists, creates and deletes the folders and reports the storage. `chooseBrowserProject` shows the dialog, and `exportBrowserProject` and `zipDirectory` write the ZIP, for hosts that use them directly. The ZIP is stored without compression and names entries in UTF-8.
+
+The browser may delete these folders when site data is cleared or the site is not used for a while (seven days in Safari). Creating the first folder asks for `navigator.storage.persist()`, which is not a guarantee. The dialog tells the user to export a ZIP or push to GitHub with Git to keep a copy.
 
 ## Block palette settings
 
@@ -55,7 +70,7 @@ Script replacements are checked against the VM before any change, and every targ
 
 ## Development
 
-Use Node.js 26, then run `npm ci` and `npm test`. Vite builds the JavaScript library, and TypeScript emits the declarations. `npm pack` creates a tarball for host integration checks. `npm run test:browser` runs the folder's external changes against a real VM and workspace in Chromium on the minimal editor runtime (`@kubohiroya/turbowarp-plus-editor-test-runtime`), with the Editor's pinned VM and Scratch Blocks and without building the Editor. It also renders the explorer with React 16.14 over a real temporary folder; set `TWPF_EXPLORER_SCREENSHOT` to a file path to save a screenshot of it.
+Use Node.js 26, then run `npm ci` and `npm test`. Vite builds the JavaScript library, and TypeScript emits the declarations. `npm pack` creates a tarball for host integration checks. `npm run test:browser` runs the folder's external changes against a real VM and workspace in Chromium on the minimal editor runtime (`@kubohiroya/turbowarp-plus-editor-test-runtime`), with the Editor's pinned VM and Scratch Blocks and without building the Editor. It also renders the explorer with React 16.14 over a real temporary folder; set `TWPF_EXPLORER_SCREENSHOT` to a file path to save a screenshot of it. Project folders in the browser are created, saved, reopened, exported as a ZIP and deleted in Chromium with the folder picker removed and in WebKit; install WebKit with `npx playwright install webkit`. The ZIP unit test and the export check read the archive with Python's `zipfile` (`python3`).
 
 The Editor's headless integration test uses an actual disk directory and substitutes the picker interaction. To verify the native picker separately, open a disposable sb3-toolchain v1 project with **File → Open Project Folder…**, accept read/write access, edit a standard block, and select **File → Save to Project Folder**. Check that `project.source.json` changed in the chosen directory and reopen the same folder to confirm the edit.
 

@@ -2,6 +2,9 @@ import {FolderError} from './source.js';
 import {createFolderSession} from './session.js';
 import {isProjectFolderEmpty} from './create-folder.js';
 import {registerFolder} from './folder-registry.js';
+import {openBrowserProjects} from './browser-projects.js';
+import type {BrowserProjects} from './browser-projects.js';
+import {chooseBrowserProject} from './browser-project-dialog.js';
 import type {FolderHost, FolderVM, PickerWindow} from './session.js';
 
 export type {Comparison, ComparisonRequest, ComparisonSection, FolderHost, FolderScreenState, FolderVM, OpenResult} from './session.js';
@@ -10,10 +13,15 @@ export {followProjectFolder} from './folder-registry.js';
 export type {FollowedFolder} from './folder-registry.js';
 export type {DeserializeBlocks} from './script-reload.js';
 export {createProjectFolder, projectFolderOverwriteWarning} from './create-folder.js';
+export {openBrowserProjects} from './browser-projects.js';
+export type {BrowserProject, BrowserProjects, BrowserStorageState} from './browser-projects.js';
+export {chooseBrowserProject, exportBrowserProject, zipFileName} from './browser-project-dialog.js';
+export type {BrowserProjectChoice} from './browser-project-dialog.js';
+export {zipDirectory} from './zip.js';
 
 const messages = {
     en: {
-        open: 'Open Project Folder…', save: 'Save to Project Folder',
+        open: 'Open Project Folder…', save: 'Save to Project Folder', openBrowser: 'Open Project Folder in This Browser…',
         replace: 'Replace the open project and discard its unsaved changes?',
         opened: 'Project folder opened.', saved: 'Project folder saved.', unchanged: 'No changes to save.',
         sourceRemoved: (ids: string[]) => `Removed source metadata for replaced extensions: ${ids.join(', ')}. Use sb3-toolchain to fetch the managed sources again if you need to keep their provenance.`,
@@ -34,7 +42,7 @@ const messages = {
         full: 'These changes need the whole project to be reloaded.'
     },
     ja: {
-        open: 'プロジェクトフォルダを開く…', save: 'プロジェクトフォルダに保存',
+        open: 'プロジェクトフォルダを開く…', save: 'プロジェクトフォルダに保存', openBrowser: 'ブラウザー内のプロジェクトフォルダを開く…',
         replace: '未保存の変更を破棄して、別の作品を開きますか？',
         opened: 'プロジェクトフォルダを開きました。', saved: 'プロジェクトフォルダに保存しました。', unchanged: '保存する変更はありません。',
         sourceRemoved: (ids: string[]) => `差し替えた拡張機能（${ids.join('、')}）の出どころ情報を削除しました。出どころを保つには、sb3-toolchain で拡張機能を取得し直してください。`,
@@ -64,7 +72,9 @@ interface MenuProps {
     MenuSection: any;
     onRequestClose(): void;
 }
-type MenuEntry = {session: ReturnType<typeof createFolderSession>; open(locale: string): void; save(locale: string): void};
+type MenuEntry = {session: ReturnType<typeof createFolderSession>; open(locale: string): void; save(locale: string): void;
+    /** Opens a folder kept in this browser, when the host shows it beside the folder picker. */
+    openBrowser?(locale: string): void};
 const menus = new WeakMap<FolderVM, MenuEntry>();
 
 type ObserverWindow = PickerWindow & {FileSystemObserver?: new (callback: () => void) => {
@@ -73,15 +83,49 @@ type ObserverWindow = PickerWindow & {FileSystemObserver?: new (callback: () => 
 }};
 
 /**
+ * Where project folders can live, besides folders the user picks on the device.
+ * - `fallback` (default): in the browser's private file system when the browser cannot pick folders, as in Safari
+ *   and Firefox. Open and Save then use those folders.
+ * - `always`: also offer the browser's folders where the browser can pick folders.
+ * - `off`: only folders on the device.
+ */
+export type BrowserStorageMode = 'fallback' | 'always' | 'off';
+
+const abort = () => new DOMException('The user closed the dialog', 'AbortError');
+
+/**
  * `autoReload` (default true) applies value and position changes without a click when the Editor has no unsaved
  * edits and the project is stopped. Other changes always wait for the reload command.
  */
-export function mountProjectFolder({vm, document, host, locale = 'en', autoReload = true}: {
-    vm: FolderVM; document: Document; host: FolderHost; locale?: string; autoReload?: boolean;
+export function mountProjectFolder({vm, document, host, locale = 'en', autoReload = true, browserStorage = 'fallback'}: {
+    vm: FolderVM; document: Document; host: FolderHost; locale?: string; autoReload?: boolean; browserStorage?: BrowserStorageMode;
 }) {
     const view = document.defaultView as ObserverWindow;
-    const pickDirectory = view?.showDirectoryPicker;
-    if (!pickDirectory || !vm.runtime?.storage) return null;
+    const devicePicker = view?.showDirectoryPicker;
+    const browserProjects: BrowserProjects | null = view && browserStorage !== 'off' &&
+        (browserStorage === 'always' || !devicePicker) ? openBrowserProjects(view) : null;
+    if ((!devicePicker && !browserProjects) || !vm.runtime?.storage) return null;
+    // Folders in the browser stand in for the picker where there is none.
+    const chooseBrowser = async (purpose: 'open' | 'create', title?: string) => {
+        const choice = await chooseBrowserProject({document, projects: browserProjects!, locale, purpose, title});
+        if (!choice) throw abort();
+        return choice.directory;
+    };
+    const pickDirectory = devicePicker ?
+        (options: {id: string; mode: 'readwrite'}) => devicePicker.call(view, options) :
+        () => chooseBrowser('open');
+    const pickNewDirectory = (options: {id: string; mode: 'readwrite'}, title?: string) =>
+        devicePicker ? devicePicker.call(view, options) : chooseBrowser('create', title);
+    /** Runs `run` with the browser folder of `directory` locked against other tabs, and marks it as updated. */
+    const withBrowserProject = async <T>(directory: FileSystemDirectoryHandle | null, run: () => Promise<T>) => {
+        const project = directory && browserProjects ? await browserProjects.find(directory).catch(() => null) : null;
+        if (!project) return run();
+        return browserProjects!.exclusive(project.id, async () => {
+            const result = await run();
+            await browserProjects!.touch(project.id).catch(() => {});
+            return result;
+        });
+    };
     const session = createFolderSession(vm, host);
     const status = document.createElement('output');
     status.dataset.projectFolderStatus = '';
@@ -230,18 +274,24 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
         session,
         open(locale) {
             const message = messageFor(locale);
-            session.open(options => pickDirectory.call(view, options), () => view.confirm(message.replace))
+            session.open(options => pickDirectory(options), () => view.confirm(message.replace))
                 .then(result => {if (result === 'opened') report(message.opened);}, error => fail(locale, error)).finally(renderReload);
             renderReload();
         },
+        openBrowser: devicePicker && browserProjects ? locale => {
+            const message = messageFor(locale);
+            session.open(() => chooseBrowser('open'), () => view.confirm(message.replace))
+                .then(result => {if (result === 'opened') report(message.opened);}, error => fail(locale, error)).finally(renderReload);
+            renderReload();
+        } : undefined,
         save(locale) {
             if (!session.busy) {
                 const message = messageFor(locale);
                 const directory = session.directory;
-                const save = () => {
+                const save = () => withBrowserProject(directory, () => {
                     if (session.directory !== directory) throw new FolderError('conflict');
                     return session.save();
-                };
+                });
                 void (host.saveWithLock?.(save) ?? save()).then(({status, sourceRemoved}) => {
                     const detail = sourceRemoved.length ? ` ${message.sourceRemoved(sourceRemoved)}` : '';
                     report(message[status] + detail);
@@ -265,19 +315,26 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
         unsavedPaths: () => session.unsavedPaths(),
         readUnsavedFile: (path: string) => session.readUnsavedFile(path),
         subscribeEdits: (listener: () => void) => session.subscribeEdits(listener),
-        save: () => session.save().finally(renderReload),
-        createFromSnapshot({prepareFiles, collectEdits, directory, current = () => true}: {
+        save: () => withBrowserProject(session.directory, () => session.save()).finally(renderReload),
+        /** The folders kept in this browser, when they are offered, for a host that lists or exports them. */
+        browserProjects,
+        /**
+         * Creates a project folder from a snapshot. `title` names a folder made in the browser, where the user names a
+         * new folder instead of picking one on the device.
+         */
+        createFromSnapshot({prepareFiles, collectEdits, directory, current = () => true, title}: {
             prepareFiles: () => Promise<ReadonlyMap<string, Uint8Array>>;
             collectEdits?: () => Promise<void>;
             directory?: FileSystemDirectoryHandle;
             current?: () => boolean;
+            title?: string;
         }) {
             const message = locale.startsWith('ja') ?
                 '指定されたフォルダは空ではありません。フォルダに保存されている内容が上書きされる場合があります。よろしいですか？' :
                 'The selected folder is not empty. Contents in the folder may be overwritten. Continue?';
             return session.createFromSnapshot(async () => {
                 try {
-                    const selected = directory ?? await pickDirectory.call(view, {id: 'turbowarp-plus-project-folder', mode: 'readwrite'});
+                    const selected = directory ?? await pickNewDirectory({id: 'turbowarp-plus-project-folder', mode: 'readwrite'}, title);
                     if (!current()) return null;
                     const overwrite = !await isProjectFolderEmpty(selected);
                     if (!current() || (overwrite && !view.confirm(message))) return null;
@@ -310,6 +367,7 @@ export function projectFolderActions(vm: FolderVM, locale = 'en') {
     if (!entry) return undefined;
     return {
         open: () => entry.open(locale),
+        openBrowser: entry.openBrowser ? () => entry.openBrowser!(locale) : undefined,
         save: entry.session.canSave ? () => entry.save(locale) : undefined,
         detach: () => entry.session.detach()
     };
@@ -321,8 +379,8 @@ export function renderProjectFolderMenu(createElement: MenuElement, {
     const entry = menus.get(vm);
     if (!entry) return null;
     const labels = locale.startsWith('ja') ? messages.ja : messages.en;
-    const item = (action: 'open' | 'save') => {
-        const run = () => {onRequestClose(); entry[action](locale);};
+    const item = (action: 'open' | 'openBrowser' | 'save') => {
+        const run = () => {onRequestClose(); entry[action]!(locale);};
         return createElement(MenuItem, {command: `project-folder-${action}`, onClick: run},
             createElement('span', {role: 'button', tabIndex: 0, onKeyDown(event: KeyboardEvent) {
                 if (event.key !== 'Enter' && event.key !== ' ') return;
@@ -331,7 +389,8 @@ export function renderProjectFolderMenu(createElement: MenuElement, {
                 run();
             }}, labels[action]));
     };
-    return createElement(MenuSection, null, item('open'), entry.session.canSave ? item('save') : null);
+    return createElement(MenuSection, null, item('open'), entry.openBrowser ? item('openBrowser') : null,
+        entry.session.canSave ? item('save') : null);
 }
 export {parseExplorerState, readExplorerState, subscribeExplorerState, writeExplorerState} from './explorer-state.js';
 export type {ExplorerTreeState} from './explorer-state.js';
