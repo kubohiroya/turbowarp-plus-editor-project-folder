@@ -1,7 +1,9 @@
-import {extensionsFile, fileVersion, FolderError, manifestFile, projectFile, readFolder, sameBytes, unsupported} from './source.js';
+import {extensionsFile, fileVersion, FolderError, manifestFile, paletteFile, projectFile, readFolder, sameBytes, unsupported} from './source.js';
 import type {Storage} from './source.js';
 
 const manifests = new Set<string>([projectFile, manifestFile, extensionsFile]);
+// Present only in a format 2 snapshot; readFolder checks that the manifest agrees.
+const optionalManifests = new Set<string>([paletteFile]);
 const sourceDirectories = ['assets', 'extensions'];
 const sourcePath = /^(?:assets\/[a-f0-9]{32}\.[A-Za-z0-9]+|extensions\/[A-Za-z0-9._-]+\.(?:js|manifest\.json))$/u;
 
@@ -39,7 +41,7 @@ export async function createProjectFolder({directory, files, storage, overwrite 
         if (!files.has(filename)) return unsupported(`Missing ${filename}`);
     }
     for (const [filename, bytes] of files) {
-        if ((!manifests.has(filename) && !sourcePath.test(filename)) || !(bytes instanceof Uint8Array)) {
+        if ((!manifests.has(filename) && !optionalManifests.has(filename) && !sourcePath.test(filename)) || !(bytes instanceof Uint8Array)) {
             return unsupported(`Invalid project folder entry: ${filename}`);
         }
     }
@@ -123,6 +125,14 @@ export async function createProjectFolder({directory, files, storage, overwrite 
                 children.delete(child.name);
             }
             directories.set(name, {handle, entries: children});
+        }
+        // A format 1 snapshot over a format 2 folder must not leave the old palette settings behind.
+        for (const name of optionalManifests) {
+            const entry = existing.get(name);
+            if (entry && !files.has(name)) {
+                await remove(directory, entry);
+                existing.delete(name);
+            }
         }
         // Publish the project JSON last, after the files it refers to.
         const entries = [...files].sort(([a], [b]) => Number(manifests.has(a)) - Number(manifests.has(b)) ||

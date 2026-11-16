@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-TurboWarp Plus Editor で既存の sb3-toolchain v1 の作品フォルダを開き、保存するパッケージです。ディレクトリハンドルから作品 JSON とローカルの画像・音声を読み込みます。保存時は外部変更を確認してから、選んだフォルダの `project.source.json` を更新します。
+TurboWarp Plus Editor で sb3-toolchain の作品フォルダ（展開ソース形式 1 と 2）を開き、保存するパッケージです。ディレクトリハンドルから作品 JSON とローカルの画像・音声を読み込みます。保存時は外部変更を確認してから、選んだフォルダの `project.source.json` を更新します。
 
 ## 接続
 
@@ -15,6 +15,14 @@ TurboWarp Plus Editor で既存の sb3-toolchain v1 の作品フォルダを開�
 ホストは VM、メニューコンポーネント、作品状態を扱うコールバックを渡します。メニューからフォルダを開くには、ブラウザーが File System Access のフォルダ選択に対応している必要があります。ブロック、変数・リスト、スプライトの位置や大きさなどの項目、モニター、組み込みの拡張機能の編集を作品データ（`project.source.json`）に保存し、作品の実行で変わった状態も含みます。スプライトの追加・削除・名前の変更と、コスチューム・音の追加・削除も保存します。新しいアセットのファイルを先に書き、`sb3-source.json` と作品データを書いてから、参照されなくなったアセットのファイルを消します。 [Editor #305](https://github.com/kubohiroya/turbowarp-plus-editor/issues/305) · [Editor #308](https://github.com/kubohiroya/turbowarp-plus-editor/issues/308)
 
 システムフォントと Web フォントの参照は作品データに保持し、埋め込みフォントは `assets/` に保存します。 [Editor #495](https://github.com/kubohiroya/turbowarp-plus-editor/issues/495)
+
+## ブロックパレットの設定
+
+展開ソース形式 2 の作品フォルダは、スプライト・背景ごとのブロックパレットの設定を `block-palette.json` に持ちます（[sb3-toolchain の形式 v2](https://github.com/kubohiroya/sb3-toolchain/blob/main/docs/ja/source-format-v2.md)）。開くときは、`project.source.json` のコメントにある参照 `block-palette:block-palette.json` を、SB3 と同じパレット設定のコメントの本文に戻して VM に読み込みます。
+
+保存時は、VM にあるパレット設定のコメントを `block-palette.json` に移し、`project.source.json` のコメントを参照に戻します。スプライトの名前を変えると、設定のキーも新しい名前になります。パレットの設定だけを変えたときは、`block-palette.json` だけを書きます。設定のある作品は形式 2、ない作品は形式 1 で保存します。形式 1 から 2 に移るときは `block-palette.json` を先に書き、2 から 1 に戻るときは `sb3-source.json` と作品データを書いてから `block-palette.json` を消します。変換には sb3-toolchain のブラウザー向けの関数を使い、toolchain の `build` と `import` が作る内容とバイト単位で同じにします。
+
+フォルダの外で `block-palette.json` が変わったときは、構造の変更として **作品全体を再読み込み** を待ちます。形式 1・2 以外の版や、`sb3-source.json` と `block-palette.json` と参照が食い違う作品フォルダは開きません。
 
 ## 拡張機能
 
@@ -31,7 +39,7 @@ TurboWarp Plus Editor で既存の sb3-toolchain v1 の作品フォルダを開�
 - `ProjectFolderExplorer` は `directory`（作品フォルダまたはリポジトリのルート）を表示します。フォルダは開いたときに読み込み、ファイルより先に並べます。`.git` と `.tw-plus` は表示しません。フォルダーごとの開いたフォルダーと選択中の項目はページの中で保持するので、横のパネルを開き直すと、前と同じツリーに戻ります。矢印キー・Home・End で移動と開閉をします。ファイルで Enter・Space を押すかクリックすると `onOpen({path, name, kind})` を呼びます。props は `directory`、`locale`（`ja…` で日本語、それ以外は英語）、`descriptions` と `marks`（Git の状態: `added`・`modified`・`deleted`・`untracked`、どちらも `directory` からの相対パスがキー）、`onOpen`、`label`（ツリーのアクセシブルな名前）です。読み込めないフォルダは、ツリーの中にメッセージを表示します。
 - `renderProjectFolderExplorer(createElement, {vm, locale, marks})` は、`vm` で開いているプロジェクトフォルダのツリーを Editor の横のパネル向けに描きます。説明はフォルダの `project.source.json` と `sb3-source.json` から作り、保存のたびに読み直します。`marks(directory, update)` はそのフォルダの印を追い、止める関数を返します（Git パッケージの `followChangeMarks` など）。フォルダを開いていないときは **プロジェクトフォルダを開く…** を出し、`vm` にプロジェクトフォルダを組み込んでいないときは何も描きません。`followProjectFolder(vm, listener)` は、組み込んだフォルダと開いているディレクトリの変化を知らせます。
 - 各行には文字色で描いたアイコンが付きます。開いた・閉じたフォルダ、作品データ（`project.source.json`・`sb3-source.json`）、JSON、画像、音、コード（`.js`・`.mjs`・`.ts`）、テキスト（`.md`・`.txt`）、その他のファイルです。画像（`.svg`・`.png`・`.jpg`・`.jpeg`・`.gif`・`.bmp`・`.webp`）は、行が画面に入るとサムネイルを表示します。2 MiB を超えるファイルと読み込めない画像はアイコンのままです。サムネイルは装飾用の `<img>` で、オブジェクト URL は行がなくなると解放します。
-- `describeProjectFolder(project, locale, {manifest, folder})` は `descriptions` を作ります。`project.source.json`・`sb3-source.json`・`embedded-extensions.json` の説明と、各アセットのファイルを使うコスチューム・背景・音を返します。`manifest` から `assetsDirectory` を読みます。`folder` はツリーのルートから見た作品フォルダのパスです。
+- `describeProjectFolder(project, locale, {manifest, folder})` は `descriptions` を作ります。`project.source.json`・`sb3-source.json`・`embedded-extensions.json`（形式 2 では `block-palette.json` も）の説明と、各アセットのファイルを使うコスチューム・背景・音を返します。`manifest` から `assetsDirectory` を読みます。`folder` はツリーのルートから見た作品フォルダのパスです。
 
 読み取り専用です。ファイルの作成・削除・名前の変更はできません。文字入力による検索もありません。
 

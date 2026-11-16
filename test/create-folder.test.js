@@ -163,3 +163,26 @@ test('failed overwrite restores replaced project files and removed source entrie
     assert.equal(await readText(await assets.getDirectoryHandle('old'), 'nested.svg'), 'nested asset');
     assert.equal(directory.children.has('embedded-extensions.json'), false);
 });
+
+// A format 2 snapshot, as the toolchain's browser unpack makes it for a project with palette comments.
+const paletteProject = {targets: [{isStage: true, name: 'Stage', costumes: [], sounds: [],
+    comments: {p: {blockId: null, x: 0, y: 0, width: 200, height: 200, minimized: true, text: 'block-palette:block-palette.json'}}}]};
+const paletteSeed = new Map([
+    ['project.source.json', bytes(paletteProject)],
+    ['sb3-source.json', bytes({formatVersion: 2, project: 'project.source.json', embeddedExtensions: 'embedded-extensions.json',
+        assetsDirectory: 'assets', archiveEntries: ['project.json'], blockPalette: 'block-palette.json'})],
+    ['embedded-extensions.json', bytes({formatVersion: 1, extensions: []})],
+    ['block-palette.json', bytes({formatVersion: 1, stage: {groups: ['events']}})]
+]);
+
+test('creates a format 2 folder, and a format 1 snapshot over it removes the palette settings', async () => {
+    const directory = memoryDirectory('palette');
+    const storage = {addHelper() {}};
+    const created = await createProjectFolder({directory, files: paletteSeed, storage});
+    assert.deepEqual(created.palette, {formatVersion: 1, stage: {groups: ['events']}});
+    assert.match(JSON.parse(created.loadText).targets[0].comments.p.text, / \/\/ _twplus_palette_$/u);
+
+    const replaced = await createProjectFolder({directory, files: seed, storage, overwrite: true});
+    assert.equal(replaced.palette, null);
+    assert.equal(directory.children.has('block-palette.json'), false);
+});

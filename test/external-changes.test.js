@@ -253,6 +253,22 @@ test('treats a changed manifest as a structural change', async t => {
     assert.equal(editor.button.textContent, 'Reload Whole Project');
 });
 
+test('treats changed block palette settings as a structural change', async t => {
+    const initial = projectAt({x: 0, y: 0});
+    initial.targets[0].comments = {p: {blockId: null, x: 0, y: 0, width: 200, height: 200, minimized: true,
+        text: 'block-palette:block-palette.json'}};
+    const editor = setup({initial});
+    t.after(() => editor.mounted.dispose());
+    editor.disk.write('sb3-source.json', stringify({formatVersion: 2, project: 'project.source.json',
+        embeddedExtensions: 'embedded-extensions.json', assetsDirectory: 'assets', archiveEntries: ['project.json'],
+        blockPalette: 'block-palette.json'}));
+    editor.disk.write('block-palette.json', stringify({formatVersion: 1, stage: {groups: ['events']}}));
+    await editor.open();
+    editor.disk.write('block-palette.json', stringify({formatVersion: 1, stage: {groups: ['events', 'control']}}));
+    await editor.scan();
+    assert.equal(editor.button.textContent, 'Reload Whole Project');
+});
+
 test('compares unsaved edits with the folder and keeps them unless the user discards them', async t => {
     const requests = [];
     let answer = 'keep';
