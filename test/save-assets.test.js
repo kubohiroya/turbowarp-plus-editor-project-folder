@@ -7,6 +7,7 @@ import {tmpdir} from 'node:os';
 import {dirname, join} from 'node:path';
 import {test} from 'node:test';
 import {extensionIntegrity, importSb3} from '@kubohiroya/sb3-toolchain';
+import {blockPaletteCommentReference, formatBlockPaletteComment} from '@kubohiroya/sb3-toolchain/browser';
 import {followProjectFolder, mountProjectFolder, projectFolderActions} from '../dist/index.js';
 
 const stringify = value => `${JSON.stringify(value, null, 2)}\n`;
@@ -17,16 +18,18 @@ const reference = (name, data) => ({name, assetId: md5(data), md5ext: `${md5(dat
 const red = svg('red'), blue = svg('blue'), green = svg('green');
 
 // An in-memory folder with the File System Access calls the session uses.
-function folder(project, assets, {embedded = {formatVersion: 1, extensions: []}, scripts = []} = {}) {
+function folder(project, assets, {embedded = {formatVersion: 1, extensions: []}, scripts = [], palette, manifest = {}} = {}) {
     let clock = 1_000;
     const entry = data => ({data, lastModified: clock++});
     const root = new Map([
         ['project.source.json', entry(bytes(stringify(project)))],
         ['embedded-extensions.json', entry(bytes(stringify(embedded)))],
-        ['sb3-source.json', entry(bytes(stringify({formatVersion: 1, project: 'project.source.json', note: 'kept',
+        ['sb3-source.json', entry(bytes(stringify({formatVersion: palette ? 2 : 1, project: 'project.source.json', note: 'kept',
             embeddedExtensions: 'embedded-extensions.json', assetsDirectory: 'assets',
-            archiveEntries: ['project.json', ...assets.map(([name]) => name)]})))]
+            archiveEntries: ['project.json', ...assets.map(([name]) => name)],
+            ...palette ? {blockPalette: 'block-palette.json'} : {}, ...manifest})))]
     ]);
+    if (palette) root.set('block-palette.json', entry(bytes(stringify(palette))));
     const assetFiles = new Map(assets.map(([name, data]) => [name, entry(data)]));
     const extensionFiles = new Map(scripts.map(([name, data]) => [name, entry(data)]));
     const log = [];
@@ -73,6 +76,7 @@ function folder(project, assets, {embedded = {formatVersion: 1, extensions: []},
     const text = name => new TextDecoder().decode(root.get(name).data);
     return {directory: {...directory(root, ''), name: 'Folder'}, root, assetFiles, extensionFiles, log, failures,
         project: () => JSON.parse(text('project.source.json')), manifest: () => JSON.parse(text('sb3-source.json')),
+        palette: () => root.has('block-palette.json') ? JSON.parse(text('block-palette.json')) : null,
         embedded: () => JSON.parse(text('embedded-extensions.json'))};
 }
 
@@ -358,4 +362,119 @@ test('saves embedded and remote extensions with toolchain-compatible metadata an
     });
     assert.equal(await app.save(), 'Project folder saved.');
     assert.deepEqual(disk.embedded().extensionBundles, []);
+});
+
+// Block palette settings (sb3-toolchain source format 2): the VM sees each setting as a comment; the folder keeps
+// the comment as a reference and the settings in block-palette.json.
+const catGroups = {formatVersion: 1, sprites: {Cat: {groups: ['events', 'control', 'pen']}}};
+const paletteText = (document, target) => formatBlockPaletteComment(document, target);
+const paletteComment = text => ({blockId: null, x: 0, y: 0, width: 200, height: 200, minimized: true, text});
+const withPaletteReference = () => {
+    const project = initialProject();
+    project.targets[1].comments = {note: paletteComment('A plain note'), palette: paletteComment(blockPaletteCommentReference)};
+    return project;
+};
+const assetsOf = () => [[`${md5(red)}.svg`, red], [`${md5(blue)}.svg`, blue]];
+
+test('opens a format 2 folder with palette comments in full and keeps the settings with a renamed sprite', async t => {
+    const disk = folder(withPaletteReference(), assetsOf(), {palette: catGroups});
+    const app = editor(initialProject(), new Map(assetsOf()));
+    t.after(() => app.mounted.dispose());
+    assert.equal(await app.mounted.openDirectory(disk.directory, () => true), 'opened');
+    assert.equal(app.snapshot().targets[1].comments.palette.text, paletteText(catGroups, {isStage: false, name: 'Cat'}));
+    assert.equal(app.snapshot().targets[1].comments.note.text, 'A plain note');
+    assert.equal(await app.save(), 'No changes to save.');
+
+    const manifest = disk.root.get('sb3-source.json');
+    app.edit(targets => {targets[1].name = 'Kitten';});
+    disk.log.length = 0;
+    assert.equal(await app.save(), 'Project folder saved.');
+    assert.deepEqual(disk.log, ['write block-palette.json', 'write project.source.json']);
+    assert.deepEqual(disk.palette(), {formatVersion: 1, sprites: {Kitten: {groups: ['events', 'control', 'pen']}}});
+    assert.equal(disk.project().targets[1].comments.palette.text, blockPaletteCommentReference);
+    assert.equal(disk.root.get('sb3-source.json'), manifest);
+});
+
+test('a change to palette settings alone writes only block-palette.json', async t => {
+    const disk = folder(withPaletteReference(), assetsOf(), {palette: catGroups});
+    const app = editor(initialProject(), new Map(assetsOf()));
+    t.after(() => app.mounted.dispose());
+    assert.equal(await app.mounted.openDirectory(disk.directory, () => true), 'opened');
+    const changed = {formatVersion: 1, sprites: {Cat: {groups: ['motion', 'looks']}}};
+    app.edit(targets => {targets[1].comments.palette.text = paletteText(changed, {isStage: false, name: 'Cat'});});
+    assert.deepEqual(app.mounted.unsavedPaths(), new Set(['block-palette.json']));
+    assert.deepEqual(app.mounted.readUnsavedFile('block-palette.json'), bytes(stringify(changed)));
+    disk.log.length = 0;
+    assert.equal(await app.save(), 'Project folder saved.');
+    assert.deepEqual(disk.log, ['write block-palette.json']);
+    assert.deepEqual(disk.palette(), changed);
+});
+
+test('moves a folder to format 2 when palette settings appear, and back to format 1 when they go', async t => {
+    const {disk, app} = await setup(t);
+    const stage = {formatVersion: 1, order: ['events', 'control'], stage: {groups: ['events']}};
+    app.edit(targets => {
+        targets[0].comments = {palette: paletteComment(paletteText(stage, {isStage: true, name: 'Stage'}))};
+    });
+    disk.log.length = 0;
+    assert.equal(await app.save(), 'Project folder saved.');
+    assert.deepEqual(disk.log, ['write block-palette.json', 'write sb3-source.json', 'write project.source.json']);
+    assert.deepEqual(disk.palette(), stage);
+    assert.equal(disk.project().targets[0].comments.palette.text, blockPaletteCommentReference);
+    assert.deepEqual(Object.keys(disk.manifest()),
+        ['formatVersion', 'project', 'note', 'embeddedExtensions', 'assetsDirectory', 'archiveEntries', 'blockPalette']);
+    assert.equal(disk.manifest().formatVersion, 2);
+
+    app.edit(targets => {targets[0].comments = {};});
+    disk.log.length = 0;
+    assert.equal(await app.save(), 'Project folder saved.');
+    assert.deepEqual(disk.log, ['write sb3-source.json', 'write project.source.json', 'remove block-palette.json']);
+    assert.equal(disk.palette(), null);
+    assert.equal(disk.manifest().formatVersion, 1);
+    assert.equal(disk.manifest().blockPalette, undefined);
+});
+
+test('writes block palette settings that the toolchain checks and rebuilds byte for byte', async t => {
+    const {disk, app} = await setup(t);
+    const document = {formatVersion: 1, order: ['events', 'pen'], stage: {groups: ['events']},
+        sprites: {Cat: {groups: ['events', 'pen', 'myExt/geometry']}}};
+    app.edit(targets => {
+        targets[0].comments = {stagePalette: paletteComment(paletteText(document, {isStage: true, name: 'Stage'}))};
+        targets[1].comments = {catPalette: paletteComment(paletteText(document, {isStage: false, name: 'Cat'}))};
+    });
+    assert.equal(await app.save(), 'Project folder saved.');
+    const working = await mkdtemp(join(tmpdir(), 'tw-project-palette-'));
+    t.after(() => rm(working, {recursive: true, force: true}));
+    const source = join(working, 'source');
+    await mkdir(join(source, 'assets'), {recursive: true});
+    for (const [prefix, files] of [['', disk.root], ['assets', disk.assetFiles]]) {
+        await Promise.all([...files].map(([name, entry]) => writeFile(join(source, prefix, name), entry.data)));
+    }
+    execFileSync(process.execPath, [cli, 'check', source]);
+    const archive = join(working, 'palette.sb3');
+    execFileSync(process.execPath, [cli, 'build', source, '--output', archive]);
+    const imported = join(working, 'imported');
+    execFileSync(process.execPath, [cli, 'import', archive, '--output', imported, '--yes']);
+    for (const name of ['block-palette.json', 'sb3-source.json']) {
+        const expected = name === 'sb3-source.json' ? (({note: _, ...manifest}) => manifest)(disk.manifest()) :
+            disk.palette();
+        assert.deepEqual(JSON.parse(await readFile(join(imported, name), 'utf8')), expected, name);
+    }
+    assert.deepEqual(await readFile(join(imported, 'block-palette.json')), Buffer.from(disk.root.get('block-palette.json').data));
+});
+
+test('refuses folders whose format or palette settings do not agree', async t => {
+    const cases = [
+        ['format 3', folder(initialProject(), assetsOf(), {manifest: {formatVersion: 3}})],
+        ['format 2 without palette file', folder(initialProject(), assetsOf(), {manifest: {formatVersion: 2}})],
+        ['format 1 naming a palette file', folder(initialProject(), assetsOf(), {manifest: {blockPalette: 'block-palette.json'}})],
+        ['reference without settings', folder(withPaletteReference(), assetsOf(), {palette: {formatVersion: 1}})],
+        ['settings for an unknown sprite', folder(withPaletteReference(), assetsOf(),
+            {palette: {formatVersion: 1, sprites: {Cat: {groups: []}, Dog: {groups: []}}}})]
+    ];
+    for (const [label, disk] of cases) {
+        const app = editor(initialProject(), new Map(assetsOf()));
+        t.after(() => app.mounted.dispose());
+        await assert.rejects(app.mounted.openDirectory(disk.directory, () => true), {code: 'unsupported'}, label);
+    }
 });

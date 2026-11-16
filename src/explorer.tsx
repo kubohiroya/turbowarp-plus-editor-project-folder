@@ -67,6 +67,7 @@ const messages = {
         unsaved: 'Unsaved changes', staged: 'Added to Git index',
         revisions: {committed: 'Committed', pushed: 'Pushed', merged: 'Pull request merged'},
         project: 'Project data', manifest: 'Folder manifest', extensions: 'Embedded extensions',
+        palette: 'Block palette settings',
         assetsDirectory: 'Costume and sound files', extensionsDirectory: 'Extension files',
         costume: (sprite: string, name: string) => `${sprite} · costume ${name}`,
         backdrop: (name: string) => `Stage · backdrop ${name}`,
@@ -86,6 +87,7 @@ const messages = {
         unsaved: '未保存の変更あり', staged: 'Git のインデックスに追加済み',
         revisions: {committed: 'コミット済み', pushed: 'プッシュ済み', merged: 'PR マージ済み'},
         project: '作品データ', manifest: '作品フォルダの目録', extensions: '埋め込み拡張の一覧',
+        palette: 'ブロックパレットの設定',
         assetsDirectory: 'コスチュームと音のファイル', extensionsDirectory: '拡張のファイル',
         costume: (sprite: string, name: string) => `${sprite} のコスチューム ${name}`,
         backdrop: (name: string) => `ステージの背景 ${name}`,
@@ -117,6 +119,8 @@ export function describeProjectFolder(project: Project, locale?: string, {manife
         [at(assetsDirectory), message.assetsDirectory],
         [at('extensions'), message.extensionsDirectory]
     ]);
+    // Only a format 2 folder names its block palette settings.
+    if (isObject(manifest) && typeof manifest.blockPalette === 'string') descriptions.set(at(manifest.blockPalette), message.palette);
     const users = new Map<string, string[]>();
     for (const target of Array.isArray(project.targets) ? project.targets : []) {
         if (!isObject(target)) continue;

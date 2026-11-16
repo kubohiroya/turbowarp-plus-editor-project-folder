@@ -2,7 +2,7 @@
 
 [日本語](README.ja.md)
 
-This package opens and saves existing sb3-toolchain v1 project folders in TurboWarp Plus Editor. It loads the project JSON and local image and audio assets directly from a directory handle. Saving updates `project.source.json` in the selected folder and checks the source for external changes before writing.
+This package opens and saves sb3-toolchain project folders (source formats 1 and 2) in TurboWarp Plus Editor. It loads the project JSON and local image and audio assets directly from a directory handle. Saving updates `project.source.json` in the selected folder and checks the source for external changes before writing.
 
 ## Integration
 
@@ -18,6 +18,14 @@ The project file keeps system and web font references. Embedded font files are s
 
 Folders can contain embedded extension scripts and custom extension URLs. Opening a folder restores embedded scripts as data URLs and uses the Editor's extension review. Saving preserves unchanged extension files and metadata, and reports when replacing a script removes its recorded source. See [拡張機能](README.ja.md#拡張機能).
 
+## Block palette settings
+
+A source format 2 folder keeps per-sprite and stage block palette settings in `block-palette.json` (see [sb3-toolchain source format v2](https://github.com/kubohiroya/sb3-toolchain/blob/main/docs/source-format-v2.md)). Opening the folder turns each `block-palette:block-palette.json` comment reference in `project.source.json` back into the palette comment text an SB3 has, and the VM loads that.
+
+Saving moves the VM's palette comments into `block-palette.json` and puts the references back in `project.source.json`. A renamed sprite keeps its settings under the new name. A change to palette settings alone writes only `block-palette.json`. A project with settings is saved as format 2, and one without as format 1: moving to format 2 writes `block-palette.json` first, and moving back deletes it after `sb3-source.json` and the project file are written. The conversion uses sb3-toolchain's browser functions, so the files match what the toolchain's `build` and `import` produce, byte for byte.
+
+A change to `block-palette.json` outside the Editor is a structural change that waits for **Reload Whole Project**. Folders of other format versions, or whose `sb3-source.json`, `block-palette.json` and references disagree, are not opened.
+
 ## Folder explorer
 
 The `./explorer` entry (`@kubohiroya/turbowarp-plus-editor-project-folder/explorer`) is a tree of a folder for the Editor's side panel, built on [Headless Tree](https://headless-tree.lukasbach.com/), which is bundled. It renders with the host's React 16.14–18 (an optional peer dependency); the main entry does not use React.
@@ -25,7 +33,7 @@ The `./explorer` entry (`@kubohiroya/turbowarp-plus-editor-project-folder/explor
 - `ProjectFolderExplorer` shows `directory` (a project folder or a repository root). Folders load when expanded and sort before files, and `.git` and `.tw-plus` are hidden. The expanded folders and the selected entry of each folder are kept for the page, so the tree comes back as it was when the side panel shows it again. Arrow keys, Home and End move and expand; Enter, Space or a click on a file calls `onOpen({path, name, kind})`. Props: `directory`, `locale` (`ja…` for Japanese, otherwise English), `descriptions` and `marks` (Git status: `added`, `modified`, `deleted` or `untracked`), both keyed by the path relative to `directory`, `onOpen` and `label` (the tree's accessible name). A folder that cannot be read shows a message in the tree.
 - `renderProjectFolderExplorer(createElement, {vm, locale, marks})` renders that explorer on the project folder open for `vm`, for the Editor's side panel, with descriptions from the folder's `project.source.json` and `sb3-source.json` (read again after each save). `marks(directory, update)` follows marks for the directory and returns the function that stops it, such as the Git package's `followChangeMarks`. With no folder open it offers **Open Project Folder…**; it renders nothing while no project folder is mounted for `vm`. `followProjectFolder(vm, listener)` reports the mounted folder and its open directory as they change.
 - Each row has an icon drawn in the text color: an open or closed folder, project data (`project.source.json`, `sb3-source.json`), JSON, image, sound, code (`.js`, `.mjs`, `.ts`), text (`.md`, `.txt`) or another file. Images (`.svg`, `.png`, `.jpg`, `.jpeg`, `.gif`, `.bmp`, `.webp`) show a thumbnail once their row is on screen; files over 2 MiB, and images that cannot be read, keep the icon. Thumbnails are decorative `<img>` elements from object URLs, which are revoked when the row goes away.
-- `describeProjectFolder(project, locale, {manifest, folder})` builds `descriptions`: what `project.source.json`, `sb3-source.json` and `embedded-extensions.json` are, and which costumes, backdrops and sounds use each asset file. `manifest` supplies `assetsDirectory`; `folder` is the project folder's path under the tree's root.
+- `describeProjectFolder(project, locale, {manifest, folder})` builds `descriptions`: what `project.source.json`, `sb3-source.json` and `embedded-extensions.json` (and `block-palette.json` in format 2) are, and which costumes, backdrops and sounds use each asset file. `manifest` supplies `assetsDirectory`; `folder` is the project folder's path under the tree's root.
 
 The explorer only reads. It does not create, delete or rename files, and has no type-ahead search.
 

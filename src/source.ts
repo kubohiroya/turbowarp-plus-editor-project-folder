@@ -1,3 +1,7 @@
+import {applyBlockPaletteComments, blockPaletteFile, extractBlockPalette, resolveBlockPaletteReferences,
+    serializeBlockPaletteDocument, validateBlockPaletteDocument} from '@kubohiroya/sb3-toolchain/browser';
+import type {BlockPaletteDocument} from '@kubohiroya/sb3-toolchain/browser';
+
 export type Json = null | boolean | number | string | Json[] | {[key: string]: Json};
 export type JsonObject = {[key: string]: Json};
 export type Project = JsonObject & {targets: Target[]};
@@ -6,6 +10,8 @@ type Target = JsonObject & {isStage: boolean; name: string};
 export const projectFile = 'project.source.json';
 export const manifestFile = 'sb3-source.json';
 export const extensionsFile = 'embedded-extensions.json';
+/** Block palette settings of source format 2. Format 1 folders have no such file. */
+export const paletteFile = blockPaletteFile;
 const embeddedReference = 'embedded-extension:';
 
 export class FolderError extends Error {
@@ -65,7 +71,37 @@ export type FolderSource = FolderFiles & {
     loadText: string;
     storageAssets: Map<string, Asset>;
     embedded: ExtensionManifest;
+    /** The folder's `block-palette.json`, or null for a format 1 folder. */
+    palette: BlockPaletteDocument | null;
 };
+
+// The toolchain reports a broken palette with a plain Error; the Editor treats it as an unsupported folder.
+const palette = <T>(action: () => T): T => {
+    try {
+        return action();
+    } catch (error) {
+        if (error instanceof FolderError) throw error;
+        return unsupported(`Invalid block palette settings: ${error instanceof Error ? error.message : String(error)}`);
+    }
+};
+type ToolchainProject = Parameters<typeof extractBlockPalette>[0];
+/** A copy of a folder project with each palette reference turned back into its comment text, as the VM loads it. */
+export const expandPalette = (project: Project, document: BlockPaletteDocument | null): Project => {
+    if (!document) return project;
+    const copy = structuredClone(project);
+    palette(() => applyBlockPaletteComments(copy as ToolchainProject, document));
+    return copy;
+};
+/**
+ * Moves palette comments from a project in the Editor's form into `block-palette.json` and returns the folder form
+ * of the project with the document, or a null document when no sprite or the stage has palette settings.
+ */
+export const collapsePalette = (project: Project): {project: Project; document: BlockPaletteDocument | null} => {
+    const copy = structuredClone(project);
+    const {document} = palette(() => extractBlockPalette(copy as ToolchainProject));
+    return {project: copy, document};
+};
+export const encodePalette = (document: BlockPaletteDocument) => new TextEncoder().encode(serializeBlockPaletteDocument(document));
 
 const getFile = async (dir: FileSystemDirectoryHandle | null, name: string) =>
     dir ? (await dir.getFileHandle(name)).getFile() : unsupported(`Missing folder for ${name}`);
@@ -286,10 +322,21 @@ export async function readFolder(directory: FileSystemDirectoryHandle, storage: 
     const project = parseProject(projectText);
     const manifest = readObject(decoder.decode(files.get(manifestFile)));
     const embedded = readObject(decoder.decode(files.get(extensionsFile)));
-    if (manifest.formatVersion !== 1 || manifest.project !== projectFile || manifest.embeddedExtensions !== extensionsFile ||
-        manifest.assetsDirectory !== 'assets' || !Array.isArray(manifest.archiveEntries)) {
-        return unsupported('Expected an sb3-toolchain v1 folder');
+    // Format 2 adds block-palette.json, and only a folder with palette settings uses it.
+    const formatVersion = manifest.formatVersion;
+    if ((formatVersion !== 1 && formatVersion !== 2) || manifest.project !== projectFile ||
+        manifest.embeddedExtensions !== extensionsFile || manifest.assetsDirectory !== 'assets' ||
+        !Array.isArray(manifest.archiveEntries) ||
+        (formatVersion === 1 ? manifest.blockPalette !== undefined : manifest.blockPalette !== paletteFile)) {
+        return unsupported('Expected an sb3-toolchain v1 or v2 folder');
     }
+    let paletteDocument: BlockPaletteDocument | null = null;
+    if (formatVersion === 2) {
+        const [, paletteBytes] = await readEntry(directory, paletteFile);
+        files.set(paletteFile, paletteBytes);
+        paletteDocument = palette(() => validateBlockPaletteDocument(readObject(decoder.decode(paletteBytes))));
+    }
+    palette(() => resolveBlockPaletteReferences(project as ToolchainProject, paletteDocument));
     if (project.turboWarpPlus !== undefined) return unsupported('Plus extension manifests are not supported in project folders');
     const extensionManifest = validateExtensions(project, embedded);
     const references = projectAssets(project);
@@ -305,11 +352,12 @@ export async function readFolder(directory: FileSystemDirectoryHandle, storage: 
     }
     const bytes = new Map(await Promise.all([...expected].map(name => readEntry(assets, name, 'assets/'))));
     const extensionBytes = new Map(await Promise.all(scripts.map(name => readEntry(extensions, name, 'extensions/'))));
-    const loadText = extensionManifest.extensions.length ? JSON.stringify({...project, extensionURLs: {
+    const loaded = expandPalette(project, paletteDocument);
+    const loadText = extensionManifest.extensions.length ? JSON.stringify({...loaded, extensionURLs: {
         ...extensionURLs(project),
         ...Object.fromEntries(extensionManifest.extensions.map(entry =>
             [entry.id, encodeDataUrl(entry, extensionBytes.get(`${entry.id}.js`)!)]))
-    }}) : projectText;
+    }}) : paletteDocument ? JSON.stringify(loaded) : projectText;
     const storageAssets = new Map<string, Asset>();
     for (const [name, kind] of references) {
         const [id, format] = name.split('.');
@@ -318,7 +366,8 @@ export async function readFolder(directory: FileSystemDirectoryHandle, storage: 
         if (asset.assetId !== id) return unsupported(`Asset hash mismatch: ${name}`);
         storageAssets.set(assetKey(type, id, format), asset);
     }
-    return {versions, files, directory, bytes, extensionBytes, project, loadText, storageAssets, embedded: extensionManifest};
+    return {versions, files, directory, bytes, extensionBytes, project, loadText, storageAssets, embedded: extensionManifest,
+        palette: paletteDocument};
 }
 
 export const sameBytes = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((value, index) => value === b[index]);
@@ -337,7 +386,8 @@ export async function readFolderUpdate(source: FolderSource, previous: FolderUpd
         const [assetNames, extensionNames] = await Promise.all([readNames(assets), readNames(extensions)]);
         if (!sameNames(assetNames, source.bytes.keys()) || !sameNames(extensionNames, source.extensionBytes.keys())) return 'structure';
         const unchanged = await Promise.all([
-            ...[manifestFile, extensionsFile].map(async name => fileVersion(await getFile(directory, name)) === versions.get(name)),
+            ...[manifestFile, extensionsFile, ...source.files.has(paletteFile) ? [paletteFile] : []]
+                .map(async name => fileVersion(await getFile(directory, name)) === versions.get(name)),
             ...[...assetNames].map(async name => fileVersion(await getFile(assets, name)) === versions.get(`assets/${name}`)),
             ...[...extensionNames].map(async name => fileVersion(await getFile(extensions, name)) === versions.get(`extensions/${name}`))
         ]);

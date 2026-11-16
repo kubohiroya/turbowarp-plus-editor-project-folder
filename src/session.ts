@@ -1,5 +1,6 @@
-import {assetKey, assetTypeFor, assertFolderUnchanged, extensionsFile, fileVersion, FolderError, manifestFile, parseProject,
-    planExtensionSave, projectAssets, projectChanges, projectFile, readFolder, readFolderUpdate, sameBytes, unsupported} from './source.js';
+import {assetKey, assetTypeFor, assertFolderUnchanged, collapsePalette, encodePalette, expandPalette, extensionsFile, fileVersion,
+    equal, FolderError, manifestFile, paletteFile, parseProject, planExtensionSave, projectAssets, projectChanges, projectFile, readFolder,
+    readFolderUpdate, sameBytes, unsupported} from './source.js';
 import type {Asset, AssetKind, FolderSource, FolderUpdate, JsonObject, Project, Storage} from './source.js';
 import {applyBlockReload, planBlockReload} from './block-reload.js';
 import type {ReloadTarget} from './block-reload.js';
@@ -145,10 +146,13 @@ type SaveDirectory = {directory: FileSystemDirectoryHandle; files: Map<string, U
 type VMAsset = {assetId: string; dataFormat: string; data?: Uint8Array};
 const encodeJson = (value: unknown) => new TextEncoder().encode(`${JSON.stringify(value, null, 2)}\n`);
 
-function saveManifest(source: FolderSource, added: Iterable<string>, removed: readonly string[]) {
-    const value = JSON.parse(new TextDecoder().decode(source.files.get(manifestFile))) as JsonObject;
+// The folder uses source format 2 exactly when it has palette settings, and format 1 otherwise.
+function saveManifest(source: FolderSource, added: Iterable<string>, removed: readonly string[], palette: boolean) {
+    const {blockPalette: _, ...value} = JSON.parse(new TextDecoder().decode(source.files.get(manifestFile))) as JsonObject;
     const entries = (value.archiveEntries as string[]).filter(name => !removed.includes(name));
-    return encodeJson({...value, archiveEntries: [...entries, ...added]});
+    // Same key order as the toolchain writes: the palette file comes last.
+    return encodeJson({...value, formatVersion: palette ? 2 : 1, archiveEntries: [...entries, ...added],
+        ...palette ? {blockPalette: paletteFile} : {}});
 }
 
 export function createFolderSession(vm: FolderVM, host: FolderHost) {
@@ -216,12 +220,25 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
     const changed = () => {revision++; notifyEdits();};
     const planSave = (session: Session, edited: Project) => {
         const {source} = session;
-        const result = projectChanges(source.project, session.baseline, edited, identity(session, edited));
+        // Edits apply to the project as the VM saw it, with palette comments in full, so that a renamed sprite keeps
+        // its settings. The comments then move back to block-palette.json for the folder.
+        const expanded = projectChanges(expandPalette(source.project, source.palette), session.baseline, edited,
+            identity(session, edited));
+        const collapsed = expanded ? collapsePalette(expanded) : null;
+        // A change to palette settings alone leaves the project file as it was.
+        const result = collapsed && !equal(collapsed.project, source.project) ? collapsed.project : null;
+        const palette = collapsed ? collapsed.document : source.palette;
+        const paletteBytes = palette ? encodePalette(palette) : null;
+        const previousPalette = source.files.get(paletteFile) ?? null;
+        const paletteChanged = paletteBytes === null ? previousPalette !== null :
+            previousPalette === null || !sameBytes(paletteBytes, previousPalette);
         const extensionSave = planExtensionSave(source, result ?? source.project);
         const needed = projectAssets(extensionSave.project);
         const added = [...needed].filter(([name]) => !source.bytes.has(name));
         const removed = [...source.bytes.keys()].filter(name => !needed.has(name));
-        return {result, extensionSave, added, removed};
+        // The manifest changes with the asset list and when the folder moves between format 1 and 2.
+        const manifestChanged = added.length > 0 || removed.length > 0 || (paletteBytes === null) !== (previousPalette === null);
+        return {result, extensionSave, added, removed, palette, paletteBytes, paletteChanged, manifestChanged};
     };
     // The explorer's tree from the folder's screen state. It can arrive before or after the folder is current.
     let expectingTree = false;
@@ -357,10 +374,11 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
             const paths = new Set<string>();
             if (!current) return paths;
             try {
-                const {result, extensionSave, added, removed} = planSave(current, snapshot());
+                const {result, extensionSave, added, removed, paletteChanged, manifestChanged} = planSave(current, snapshot());
                 if (result) paths.add(projectFile);
                 if (extensionSave.manifestChanged) paths.add(extensionsFile);
-                if (added.length || removed.length) paths.add(manifestFile);
+                if (manifestChanged) paths.add(manifestFile);
+                if (paletteChanged) paths.add(paletteFile);
                 for (const name of [...added.map(([name]) => name), ...removed]) paths.add(`assets/${name}`);
                 for (const name of [...extensionSave.writes.keys(), ...extensionSave.removed]) paths.add(`extensions/${name}`);
             } catch (error) {
@@ -373,11 +391,13 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
         readUnsavedFile(path: string): Uint8Array | null | undefined {
             if (!current || busy) return;
             try {
-                const {result, extensionSave, added, removed} = planSave(current, snapshot());
+                const {result, extensionSave, added, removed, paletteBytes, paletteChanged, manifestChanged} =
+                    planSave(current, snapshot());
                 if (path === projectFile && result) return encodeJson(extensionSave.project);
                 if (path === extensionsFile && extensionSave.manifestChanged) return encodeJson(extensionSave.embedded);
-                if (path === manifestFile && (added.length || removed.length))
-                    return saveManifest(current.source, added.map(([name]) => name), removed);
+                if (path === manifestFile && manifestChanged)
+                    return saveManifest(current.source, added.map(([name]) => name), removed, paletteBytes !== null);
+                if (path === paletteFile && paletteChanged) return paletteBytes;
                 if (path.startsWith('assets/')) {
                     const name = path.slice('assets/'.length);
                     if (removed.includes(name)) return null;
@@ -436,9 +456,8 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
             const base = decoder.decode(session.source.files.get(projectFile));
             let editor: string | null;
             try {
-                const edited = snapshot();
-                const result = projectChanges(session.source.project, session.baseline, edited, identity(session, edited));
-                editor = result ? `${JSON.stringify(planExtensionSave(session.source, result).project, null, 2)}\n` : base;
+                const {result, extensionSave} = planSave(session, snapshot());
+                editor = result ? `${JSON.stringify(extensionSave.project, null, 2)}\n` : base;
             } catch (error) {
                 if (!(error instanceof FolderError)) throw error;
                 editor = null;
@@ -552,7 +571,8 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
                 const saveRevision = revision;
                 const edited = snapshot();
                 const ids = identify(edited);
-                const {result, extensionSave, added: newAssets, removed} = planSave(session, edited);
+                const {result, extensionSave, added: newAssets, removed, palette, paletteBytes, paletteChanged, manifestChanged} =
+                    planSave(session, edited);
                 await assertFolderUnchanged(session.source);
                 active(session);
                 const {source} = session;
@@ -565,13 +585,13 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
                     if (asset.assetId !== id) return unsupported(`Asset hash mismatch: ${name}`);
                     added.set(name, data);
                 }
-                if (!result && !removed.length && !extensionSave.removed.length) {
+                if (!result && !removed.length && !extensionSave.removed.length && !paletteChanged && !manifestChanged) {
                     await saveScreenState(source.directory);
                     if (revision === saveRevision) host.onSaved();
                     notify();
                     return {status: 'unchanged', sourceRemoved: []};
                 }
-                const manifest = added.size || removed.length ? saveManifest(source, added.keys(), removed) : null;
+                const manifest = manifestChanged ? saveManifest(source, added.keys(), removed, paletteBytes !== null) : null;
                 const root = {directory: source.directory, files: source.files, prefix: ''};
                 const assets = {directory: await source.directory.getDirectoryHandle('assets', {create: true}), files: source.bytes, prefix: 'assets/'};
                 const extensions = {directory: await source.directory.getDirectoryHandle('extensions', {create: true}),
@@ -626,6 +646,7 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
                 try {
                     for (const [name, data] of added) await write(assets, name, data);
                     for (const [name, data] of extensionSave.writes) await write(extensions, name, data);
+                    if (paletteBytes && paletteChanged) await write(root, paletteFile, paletteBytes);
                     if (manifest) await write(root, manifestFile, manifest);
                     if (extensionSave.manifestChanged) {
                         await write(root, extensionsFile, encodeJson(extensionSave.embedded));
@@ -637,7 +658,10 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
                 }
                 source.project = extensionSave.project;
                 source.embedded = extensionSave.embedded;
-                for (const [{directory, files, prefix}, names] of [[assets, removed], [extensions, extensionSave.removed]] as const) {
+                source.palette = palette;
+                const removedRoot = paletteBytes === null && paletteChanged ? [paletteFile] : [];
+                for (const [{directory, files, prefix}, names] of
+                    [[root, removedRoot], [assets, removed], [extensions, extensionSave.removed]] as const) {
                     for (const name of names) {
                         try {
                             const file = await (await directory.getFileHandle(name)).getFile();

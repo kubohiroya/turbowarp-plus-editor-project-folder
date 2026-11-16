@@ -35,6 +35,13 @@ test('describes the folder in Japanese', () => {
     assert.equal(descriptions.get(`assets/${d}.wav`), 'Cat の音 Meow');
 });
 
+test('describes the block palette settings of a format 2 folder', () => {
+    const manifest = {formatVersion: 2, blockPalette: 'block-palette.json'};
+    assert.equal(describeProjectFolder(project(), 'en', {manifest}).get('block-palette.json'), 'Block palette settings');
+    assert.equal(describeProjectFolder(project(), 'ja', {manifest}).get('block-palette.json'), 'ブロックパレットの設定');
+    assert.equal(describeProjectFolder(project(), 'en', {manifest: {formatVersion: 1}}).has('block-palette.json'), false);
+});
+
 test('uses English for other locales and the default', () => {
     assert.equal(describeProjectFolder(project()).get('project.source.json'), 'Project data');
     assert.equal(describeProjectFolder(project(), 'fr').get(`assets/${d}.wav`), 'Cat · sound Meow');
