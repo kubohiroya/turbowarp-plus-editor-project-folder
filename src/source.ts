@@ -10,6 +10,8 @@ type Target = JsonObject & {isStage: boolean; name: string};
 export const projectFile = 'project.source.json';
 export const manifestFile = 'sb3-source.json';
 export const extensionsFile = 'embedded-extensions.json';
+/** The ZIP entry of the Editor's screen state, which sb3-toolchain lists in `archiveEntries`. */
+const screenStateEntry = 'tw-plus/workspace.json';
 /** Block palette settings of source format 2. Format 1 folders have no such file. */
 export const paletteFile = blockPaletteFile;
 const embeddedReference = 'embedded-extension:';
@@ -341,7 +343,9 @@ export async function readFolder(directory: FileSystemDirectoryHandle, storage: 
     const extensionManifest = validateExtensions(project, embedded);
     const references = projectAssets(project);
     const expected = new Set(['project.json', ...references.keys()]);
-    if (manifest.archiveEntries.length !== expected.size || !sameNames(new Set(manifest.archiveEntries as string[]), expected)) {
+    // sb3-toolchain lists the Editor's screen state among the entries; the file itself is not an asset.
+    const listed = (manifest.archiveEntries as string[]).filter(name => name !== screenStateEntry);
+    if (listed.length !== expected.size || !sameNames(new Set(listed), expected)) {
         return unsupported('Asset references and archiveEntries do not match');
     }
     expected.delete('project.json');

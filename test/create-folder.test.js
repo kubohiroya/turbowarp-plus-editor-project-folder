@@ -186,3 +186,49 @@ test('creates a format 2 folder, and a format 1 snapshot over it removes the pal
     assert.equal(replaced.palette, null);
     assert.equal(directory.children.has('block-palette.json'), false);
 });
+
+const screenState = '{"version":1,"savedAt":1,"slices":{"blockPalette":{"version":1,"sprites":{"Cat":{"groups":["events"]}}}}}';
+
+test('a snapshot with the Editor screen state writes it where opening the folder reads it', async () => {
+    const directory = memoryDirectory('screen');
+    const storage = {addHelper() {}};
+    const files = new Map([...seed, ['.tw-plus/workspace.json', new TextEncoder().encode(screenState)]]);
+    await createProjectFolder({directory, files, storage});
+    assert.equal(await readText(await directory.getDirectoryHandle('.tw-plus'), 'workspace.json'), screenState);
+    assert.equal(directory.children.has('workspace.json'), false);
+
+    // The Editor's folder keeps its other files; a snapshot without a screen state removes the old one.
+    await writeText(await directory.getDirectoryHandle('.tw-plus'), 'notes.json', '{}');
+    await createProjectFolder({directory, files: seed, storage, overwrite: true});
+    const editor = await directory.getDirectoryHandle('.tw-plus');
+    assert.equal(editor.children.has('workspace.json'), false);
+    assert.equal(editor.children.has('notes.json'), true);
+});
+
+test('creating from an SB3 unpacked by sb3-toolchain opens with its screen state', async t => {
+    const {unpackSb3} = await import('@kubohiroya/sb3-toolchain/browser');
+    const {zipSync, strToU8} = await import('fflate');
+    const sb3 = zipSync({'project.json': strToU8(JSON.stringify(project)), 'tw-plus/workspace.json': strToU8(screenState)});
+    const {files} = unpackSb3(sb3);
+    assert.equal(new TextDecoder().decode(files.get('.tw-plus/workspace.json')), screenState);
+    const directory = memoryDirectory('from-sb3');
+    const stage = {};
+    let state = project;
+    let prepared;
+    const vm = {
+        runtime: {storage: {addHelper() {}}, getTargetForStage: () => stage, on() {}, off() {}},
+        on() {}, off() {}, quit() {}, toJSON: () => JSON.stringify(state),
+        async loadProject(text) {state = JSON.parse(text);}
+    };
+    const document = {
+        defaultView: {showDirectoryPicker: async () => directory, clearTimeout() {}},
+        body: {append() {}}, createElement: () => ({dataset: {}, style: {}, setAttribute() {}, remove() {}})
+    };
+    const folder = mountProjectFolder({vm, document, host: {
+        isProjectDirty: () => false, beforeLoad() {}, onOpened() {}, onSaved() {},
+        screenState: {serialize: () => undefined, prepareLoad: text => {prepared = text;}, register: () => () => {}}
+    }});
+    t.after(() => folder.dispose());
+    assert.equal(await folder.createFromSnapshot({prepareFiles: async () => files}), 'opened');
+    assert.equal(prepared, screenState);
+});

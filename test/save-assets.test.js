@@ -453,14 +453,13 @@ test('writes block palette settings that the toolchain checks and rebuilds byte 
     execFileSync(process.execPath, [cli, 'check', source]);
     const archive = join(working, 'palette.sb3');
     execFileSync(process.execPath, [cli, 'build', source, '--output', archive]);
+    // Since 0.26 the toolchain imports palette comments as plain comments in format 1, with the same text.
     const imported = join(working, 'imported');
     execFileSync(process.execPath, [cli, 'import', archive, '--output', imported, '--yes']);
-    for (const name of ['block-palette.json', 'sb3-source.json']) {
-        const expected = name === 'sb3-source.json' ? (({note: _, ...manifest}) => manifest)(disk.manifest()) :
-            disk.palette();
-        assert.deepEqual(JSON.parse(await readFile(join(imported, name), 'utf8')), expected, name);
-    }
-    assert.deepEqual(await readFile(join(imported, 'block-palette.json')), Buffer.from(disk.root.get('block-palette.json').data));
+    const importedProject = JSON.parse(await readFile(join(imported, 'project.source.json'), 'utf8'));
+    assert.equal(JSON.parse(await readFile(join(imported, 'sb3-source.json'), 'utf8')).formatVersion, 1);
+    assert.equal(importedProject.targets[0].comments.stagePalette.text, paletteText(document, {isStage: true, name: 'Stage'}));
+    assert.equal(importedProject.targets[1].comments.catPalette.text, paletteText(document, {isStage: false, name: 'Cat'}));
 });
 
 test('refuses folders whose format or palette settings do not agree', async t => {

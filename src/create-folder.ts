@@ -1,9 +1,12 @@
 import {extensionsFile, fileVersion, FolderError, manifestFile, paletteFile, projectFile, readFolder, sameBytes, unsupported} from './source.js';
 import type {Storage} from './source.js';
+import {editorDirectory, screenStateFile} from './explorer-state.js';
 
 const manifests = new Set<string>([projectFile, manifestFile, extensionsFile]);
 // Present only in a format 2 snapshot; readFolder checks that the manifest agrees.
 const optionalManifests = new Set<string>([paletteFile]);
+// The Editor's screen state, which sb3-toolchain unpacks from an SB3 that carries one. Opening the folder reads it.
+const screenStatePath = `${editorDirectory}/${screenStateFile}`;
 const sourceDirectories = ['assets', 'extensions'];
 const sourcePath = /^(?:assets\/[a-f0-9]{32}\.[A-Za-z0-9]+|extensions\/[A-Za-z0-9._-]+\.(?:js|manifest\.json))$/u;
 
@@ -41,7 +44,8 @@ export async function createProjectFolder({directory, files, storage, overwrite 
         if (!files.has(filename)) return unsupported(`Missing ${filename}`);
     }
     for (const [filename, bytes] of files) {
-        if ((!manifests.has(filename) && !optionalManifests.has(filename) && !sourcePath.test(filename)) || !(bytes instanceof Uint8Array)) {
+        if ((!manifests.has(filename) && !optionalManifests.has(filename) && filename !== screenStatePath && !sourcePath.test(filename)) ||
+            !(bytes instanceof Uint8Array)) {
             return unsupported(`Invalid project folder entry: ${filename}`);
         }
     }
@@ -125,6 +129,27 @@ export async function createProjectFolder({directory, files, storage, overwrite 
                 children.delete(child.name);
             }
             directories.set(name, {handle, entries: children});
+        }
+        // The Editor's own folder keeps its other files. The snapshot's screen state replaces the old one, and a
+        // snapshot without one does not leave the replaced project's screen behind.
+        const editorEntry = existing.get(editorDirectory);
+        if (files.has(screenStatePath)) {
+            if (editorEntry?.kind === 'file') await remove(directory, editorEntry);
+            const previous = await getDirectory(directory, editorDirectory);
+            if (previous && editorEntry?.kind === 'directory' && !await previous.isSameEntry(editorEntry)) {
+                throw new FolderError('conflict');
+            }
+            assertCurrent();
+            const handle = previous ?? await directory.getDirectoryHandle(editorDirectory, {create: true});
+            if (!previous) undo.push(async () => {
+                const found = await getDirectory(directory, editorDirectory);
+                if (found && await found.isSameEntry(handle)) await directory.removeEntry(editorDirectory);
+            });
+            directories.set(editorDirectory, {handle, entries: await directoryEntries(handle)});
+        } else if (editorEntry?.kind === 'directory') {
+            const handle = await getDirectory(directory, editorDirectory);
+            const stale = handle && (await directoryEntries(handle)).get(screenStateFile);
+            if (stale) await remove(handle, stale);
         }
         // A format 1 snapshot over a format 2 folder must not leave the old palette settings behind.
         for (const name of optionalManifests) {
