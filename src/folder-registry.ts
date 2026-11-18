@@ -4,7 +4,7 @@ export type ProjectFolderLocation = 'device' | 'browser';
 
 export interface FollowedFolder {
     readonly directory: FileSystemDirectoryHandle | null;
-    /** The folder the user chose for `directory`: itself, or the repository whose `project` folder it is. */
+    /** The folder the user chose for `directory`: itself, unless a host gave another one to `openDirectory`. */
     readonly root?: FileSystemDirectoryHandle | null;
     /** Storage choices available when creating a project folder. */
     readonly locations?: readonly ProjectFolderLocation[];
@@ -31,7 +31,7 @@ export function registerFolder(vm: object, folder: FollowedFolder) {
 
 /**
  * Calls `listener` with the project folder mounted for `vm`, the directory open in it and the folder the user chose for
- * it (`root`, the directory itself or the repository that holds it in `project/`), now and whenever a folder is
+ * it (`root`, the directory itself unless a host gave another one), now and whenever a folder is
  * mounted, opened, closed or saved. `directory` and `root` are `null` while no folder is open. Returns the function
  * that stops it.
  */

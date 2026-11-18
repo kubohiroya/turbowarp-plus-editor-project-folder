@@ -6,7 +6,8 @@ import type {ProjectFolderLocation} from './folder-registry.js';
 import {openBrowserProjects} from './browser-projects.js';
 import type {BrowserProjects} from './browser-projects.js';
 import {chooseBrowserProject} from './browser-project-dialog.js';
-import type {Chosen, FolderHost, FolderVM, PickerWindow} from './session.js';
+import {notProjectFolderMessage, showNotProjectFolderDialog} from './not-project-dialog.js';
+import type {Chosen, FolderHost, FolderVM, OpenResult, PickerWindow} from './session.js';
 
 export type {Comparison, ComparisonRequest, ComparisonSection, FolderHost, FolderScreenState, FolderVM, OpenResult} from './session.js';
 export type {ReloadTarget} from './block-reload.js';
@@ -18,6 +19,7 @@ export {openBrowserProjects} from './browser-projects.js';
 export type {BrowserProject, BrowserProjects, BrowserStorageState} from './browser-projects.js';
 export {chooseBrowserProject, exportBrowserProject, zipFileName} from './browser-project-dialog.js';
 export type {BrowserProjectChoice} from './browser-project-dialog.js';
+export {notProjectFolderMessage, showNotProjectFolderDialog} from './not-project-dialog.js';
 export {zipDirectory} from './zip.js';
 
 const messages = {
@@ -96,6 +98,17 @@ type ObserverWindow = PickerWindow & {FileSystemObserver?: new (callback: () => 
  */
 export type BrowserStorageMode = 'fallback' | 'always' | 'off';
 
+/** Options of `openDirectory`. */
+export interface OpenDirectoryOptions {
+    /**
+     * Whether a folder that is not a project folder is told to the user in the error dialog (default true). A host
+     * that tells the user in its own way passes false and acts on the `not-project` result.
+     */
+    notProjectDialog?: boolean;
+    /** The locale of the dialog; defaults to the `locale` given to `mountProjectFolder`. */
+    locale?: string;
+}
+
 const abort = () => new DOMException('The user closed the dialog', 'AbortError');
 
 /**
@@ -116,11 +129,8 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
         if (!choice) throw abort();
         return choice;
     };
-    // A folder kept in the browser was chosen as a whole, so its stored folder is the root even when the project is inside.
-    const chooseBrowserFolder = async (): Promise<Chosen> => {
-        const {project, directory} = await chooseBrowser('open');
-        return {directory, root: await browserProjects!.root(project.id).catch(() => null) ?? directory};
-    };
+    // The stored folder is opened as a whole, so it is its own root, as a folder on the device is.
+    const chooseBrowserFolder = async (): Promise<Chosen> => ({directory: (await chooseBrowser('open')).directory});
     const pickDirectory = devicePicker ?
         async (options: {id: string; mode: 'readwrite'}): Promise<Chosen> => ({directory: await devicePicker.call(view, options)}) :
         chooseBrowserFolder;
@@ -167,6 +177,9 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
         const detail = error instanceof FolderError && error.message !== error.code ? ` (${error.message})` : '';
         report((error instanceof FolderError ? message[error.code] : message.failed) + detail);
     };
+    // The open project stays; the dialog tells why nothing opened, or the status line where no dialog can be shown.
+    const notProject = (locale: string) => showNotProjectFolderDialog({document, locale})
+        .catch(() => report(notProjectFolderMessage(locale)));
     let stopWatching: (() => void) | undefined;
     let renderReload = () => {};
     if (host.blockReload) {
@@ -286,19 +299,23 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
             notice.remove();
         };
     }
+    const opened = (locale: string, result: OpenResult) => {
+        if (result === 'opened') report(messageFor(locale).opened);
+        else if (result === 'not-project') void notProject(locale);
+    };
     const menu: MenuEntry = {
         deviceFolders: typeof devicePicker === 'function',
         session,
         open(locale) {
             const message = messageFor(locale);
             session.open(options => pickDirectory(options), () => view.confirm(message.replace))
-                .then(result => {if (result === 'opened') report(message.opened);}, error => fail(locale, error)).finally(renderReload);
+                .then(result => opened(locale, result), error => fail(locale, error)).finally(renderReload);
             renderReload();
         },
         openBrowser: browserProjects ? locale => {
             const message = messageFor(locale);
             session.open(chooseBrowserFolder, () => view.confirm(message.replace))
-                .then(result => {if (result === 'opened') report(message.opened);}, error => fail(locale, error)).finally(renderReload);
+                .then(result => opened(locale, result), error => fail(locale, error)).finally(renderReload);
             renderReload();
         } : undefined,
         save(locale) {
@@ -329,8 +346,18 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
         mutate: (directory, operation) => session.mutate(directory, operation).finally(renderReload)
     });
     return {
-        openDirectory: (...args: Parameters<typeof session.openDirectory>) =>
-            session.openDirectory(...args).finally(renderReload),
+        /**
+         * Opens the project at the root of `directory`, as the user's Open would, and resolves with the result. A folder
+         * that is not a project folder changes nothing, shows the error dialog unless `options.notProjectDialog` is
+         * false, and resolves with `not-project`. `root` is the folder the user chose, for a host that located the
+         * project in it; it defaults to `directory`.
+         */
+        openDirectory: (directory: FileSystemDirectoryHandle, confirmReplace: () => boolean,
+            root?: FileSystemDirectoryHandle | null, options: OpenDirectoryOptions = {}): Promise<OpenResult> =>
+            session.openDirectory(directory, confirmReplace, root ?? undefined).then(result => {
+                if (result === 'not-project' && options.notProjectDialog !== false) void notProject(options.locale ?? locale);
+                return result;
+            }).finally(renderReload),
         unsavedPaths: () => session.unsavedPaths(),
         readUnsavedFile: (path: string) => session.readUnsavedFile(path),
         subscribeEdits: (listener: () => void) => session.subscribeEdits(listener),
@@ -373,8 +400,8 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
          */
         get directory() {return session.directory;},
         /**
-         * The folder the user chose for the loaded project, or `null` like `directory`. It is `directory` itself, or
-         * the repository whose `project` folder holds the project, or the stored folder of a folder kept in the browser.
+         * The folder the user chose for the loaded project, or `null` like `directory`. It is `directory` itself, the
+         * project folder, unless the host gave another folder to `openDirectory`.
          */
         get root() {return session.root;},
         dispose() {

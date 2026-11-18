@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import {fileURLToPath} from 'node:url';
-import {chromium} from '@playwright/test';
+import {chromium, expect} from '@playwright/test';
 import {serveEditorRuntime} from '@kubohiroya/turbowarp-plus-editor-test-runtime';
 
 const block = (opcode, {next = null, parent = null, inputs = {}, fields = {}, x = 0, y = 0} = {}) =>
@@ -61,4 +61,18 @@ test('an edit in the workspace holds the folder change until the user chooses', 
     await page.waitForFunction(() => folder.notice() && !folder.notice().hidden, null, {timeout: 15_000});
     assert.equal(await page.evaluate(() => folder.vmBlocks().includes('motion_turnright')), false, 'the VM keeps the edit');
     assert.equal(await page.evaluate(() => folder.workspaceBlocks().includes('motion_turnleft')), true);
+});
+
+test('a folder that is not a project folder shows the error dialog and leaves the project as it is', async t => {
+    const {page} = await open(t);
+    const loads = await page.evaluate(() => folder.loads());
+    const blocks = await page.evaluate(() => folder.vmBlocks());
+    assert.equal(await page.evaluate(() => folder.openNotProject()), 'not-project');
+    const dialog = page.getByRole('alertdialog', {name: 'Cannot Open Folder'});
+    await expect(dialog).toContainText('This folder is not a project folder.');
+    await dialog.getByRole('button', {name: 'OK'}).click();
+    await expect(dialog).toHaveCount(0);
+    assert.equal(await page.evaluate(() => folder.loads()), loads, 'the project was not reloaded');
+    assert.deepEqual(await page.evaluate(() => folder.vmBlocks()), blocks);
+    assert.equal(await page.evaluate(() => folder.directoryName()), 'Folder');
 });

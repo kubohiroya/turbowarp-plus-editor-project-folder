@@ -17,7 +17,7 @@ globalThis.setup = async ({project, withoutPicker, browserStorage = 'fallback', 
         window.showDirectoryPicker = async () => {
             globalThis.pickerCalls++;
             if (!globalThis.acceptDevicePicker) throw new DOMException('Cancelled', 'AbortError');
-            return root.getDirectoryHandle('device-fixture', {create: true});
+            return root.getDirectoryHandle(globalThis.pickerFolder ?? 'device-fixture', {create: true});
         };
     }
     const workspace = document.getElementById('workspace');
@@ -40,8 +40,9 @@ globalThis.setup = async ({project, withoutPicker, browserStorage = 'fallback', 
         runtime, folder, projects,
         actions: () => projectFolderActions(runtime.vm, locale),
         create: (title, location) => subject.created = folder.createFromSnapshot({prepareFiles: async () => files, title, location}),
-        // A repository kept in the browser, with the project in project/ as Project Starter makes it.
-        async createRepository(title) {
+        // A folder kept in the browser by an earlier version, a repository with the project in project/. The project
+        // must be at the root now, so this is no project folder.
+        async createOldLayout(title) {
             const created = await projects.create(title, {projectPath: 'project'});
             await created.root.getDirectoryHandle('.git', {create: true});
             for (const [name, bytes] of files) {
@@ -51,11 +52,11 @@ globalThis.setup = async ({project, withoutPicker, browserStorage = 'fallback', 
             }
             return created.id;
         },
-        /** Whether the open folder is the project folder of `id` and its root the stored folder. */
+        /** Whether the open folder is the stored folder of `id`, which is also its root. */
         async openedFrom(id) {
-            const [root, directory] = await Promise.all([projects.root(id), projects.directory(id)]);
+            const root = await projects.root(id);
             if (!folder.directory || !folder.root) return null;
-            return {directory: await directory.isSameEntry(folder.directory), root: await root.isSameEntry(folder.root),
+            return {directory: await root.isSameEntry(folder.directory), root: await root.isSameEntry(folder.root),
                 name: folder.directory.name};
         },
         async storedProject(id) {

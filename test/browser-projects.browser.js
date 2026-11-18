@@ -121,12 +121,27 @@ for (const [name, launch, withoutPicker, browserStorage] of engines) {
         await openDialog.getByRole('button', {name: '閉じる'}).click();
         await expect(openDialog).toHaveCount(0);
 
-        // A repository kept in the browser opens its project/ folder, and the stored folder is the root.
-        const repository = await page.evaluate(() => subject.createRepository('リポジトリ'));
+        // A stored folder opens at its root, which is its own root.
+        await page.evaluate(() => {subject.create('二つ目', 'browser');});
+        await createDialog.getByRole('button', {name: '作成'}).click();
+        assert.equal(await page.evaluate(() => subject.created), 'opened');
+        const [second] = await page.evaluate(() => subject.projects.list());
+        await page.evaluate(() => subject.actions().openBrowser());
+        await openDialog.locator(`[data-browser-project="${second.id}"]`).getByRole('button', {name: '開く'}).click();
+        await expect.poll(() => page.evaluate(id => subject.openedFrom(id), second.id))
+            .toEqual({directory: true, root: true, name: second.id});
+
+        // A folder kept with the old layout, its project in project/, is no project folder: the error dialog tells so
+        // and the open project stays.
+        const repository = await page.evaluate(() => subject.createOldLayout('リポジトリ'));
         await page.evaluate(() => subject.actions().openBrowser());
         await openDialog.locator(`[data-browser-project="${repository}"]`).getByRole('button', {name: '開く'}).click();
-        await expect.poll(() => page.evaluate(id => subject.openedFrom(id), repository))
-            .toEqual({directory: true, root: true, name: 'project'});
+        const error = page.getByRole('alertdialog', {name: 'フォルダを開けません'});
+        await expect(error).toContainText('このフォルダはプロジェクトフォルダではありません。');
+        await expect(error.getByRole('button', {name: 'OK'})).toBeFocused();
+        await error.getByRole('button', {name: 'OK'}).click();
+        await expect(error).toHaveCount(0);
+        assert.deepEqual(await page.evaluate(id => subject.openedFrom(id), second.id), {directory: true, root: true, name: second.id});
     });
 }
 
@@ -147,4 +162,14 @@ test('Chromium: the device choice saves to the selected handle and keeps browser
     assert.equal(await page.evaluate(() => subject.folder.directory.name), 'device-fixture');
     assert.deepEqual(await page.evaluate(() => subject.projects.list()), []);
     await expect(panel.locator('[data-project-folder-location]')).toHaveCount(0);
+
+    // Open with a folder on the device that is not a project folder shows the error dialog and keeps the project.
+    await page.evaluate(() => {globalThis.pickerFolder = 'notes'; subject.actions().open();});
+    const error = page.getByRole('alertdialog', {name: 'Cannot Open Folder'});
+    await expect(error).toContainText('This folder is not a project folder.');
+    await error.getByRole('button', {name: 'OK'}).click();
+    await expect(error).toHaveCount(0);
+    assert.equal(await page.evaluate(() => pickerCalls), 2);
+    assert.equal(await page.evaluate(() => subject.folder.directory.name), 'device-fixture');
+    assert.equal(await page.evaluate(() => subject.folder.root.name), 'device-fixture');
 });

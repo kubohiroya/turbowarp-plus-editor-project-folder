@@ -69,7 +69,7 @@ export type BrowserProjectChoice = {project: BrowserProject; directory: FileSyst
 
 /**
  * Shows the project folders kept in this browser. With `purpose: 'open'` the user picks one; with `'create'` the user
- * names a new empty one. Resolves with the chosen folder, or `null` when the dialog closes without one.
+ * names a new empty one. Resolves with the chosen stored folder, or `null` when the dialog closes without one.
  */
 export function chooseBrowserProject({document, projects, locale = 'en', purpose, title = ''}: {
     document: Document; projects: BrowserProjects; locale?: string; purpose: 'open' | 'create'; title?: string;
@@ -222,8 +222,9 @@ export function chooseBrowserProject({document, projects, locale = 'en', purpose
                     return element;
                 };
                 item.append(text,
+                    // The project is at the root of the stored folder, as on the device.
                     button(message.open, async () => {
-                        const directory = await projects.directory(project.id);
+                        const directory = await projects.root(project.id);
                         if (!directory) return render();
                         finish({project, directory});
                     }),
