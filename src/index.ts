@@ -5,7 +5,7 @@ import {registerFolder} from './folder-registry.js';
 import {openBrowserProjects} from './browser-projects.js';
 import type {BrowserProjects} from './browser-projects.js';
 import {chooseBrowserProject} from './browser-project-dialog.js';
-import type {FolderHost, FolderVM, PickerWindow} from './session.js';
+import type {Chosen, FolderHost, FolderVM, PickerWindow} from './session.js';
 
 export type {Comparison, ComparisonRequest, ComparisonSection, FolderHost, FolderScreenState, FolderVM, OpenResult} from './session.js';
 export type {ReloadTarget} from './block-reload.js';
@@ -21,7 +21,7 @@ export {zipDirectory} from './zip.js';
 
 const messages = {
     en: {
-        open: 'Open Project Folder…', save: 'Save to Project Folder', openBrowser: 'Open Project Folder in This Browser…',
+        open: 'Open Folder…', save: 'Save to Project Folder', openBrowser: 'Open Folder Saved in This Browser…',
         replace: 'Replace the open project and discard its unsaved changes?',
         opened: 'Project folder opened.', saved: 'Project folder saved.', unchanged: 'No changes to save.',
         sourceRemoved: (ids: string[]) => `Removed source metadata for replaced extensions: ${ids.join(', ')}. Use sb3-toolchain to fetch the managed sources again if you need to keep their provenance.`,
@@ -42,7 +42,7 @@ const messages = {
         full: 'These changes need the whole project to be reloaded.'
     },
     ja: {
-        open: 'プロジェクトフォルダを開く…', save: 'プロジェクトフォルダに保存', openBrowser: 'ブラウザー内のプロジェクトフォルダを開く…',
+        open: 'フォルダを開く…', save: 'プロジェクトフォルダに保存', openBrowser: 'ブラウザーに保存したフォルダを開く…',
         replace: '未保存の変更を破棄して、別の作品を開きますか？',
         opened: 'プロジェクトフォルダを開きました。', saved: 'プロジェクトフォルダに保存しました。', unchanged: '保存する変更はありません。',
         sourceRemoved: (ids: string[]) => `差し替えた拡張機能（${ids.join('、')}）の出どころ情報を削除しました。出どころを保つには、sb3-toolchain で拡張機能を取得し直してください。`,
@@ -109,13 +109,18 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
     const chooseBrowser = async (purpose: 'open' | 'create', title?: string) => {
         const choice = await chooseBrowserProject({document, projects: browserProjects!, locale, purpose, title});
         if (!choice) throw abort();
-        return choice.directory;
+        return choice;
+    };
+    // A folder kept in the browser was chosen as a whole, so its stored folder is the root even when the project is inside.
+    const chooseBrowserFolder = async (): Promise<Chosen> => {
+        const {project, directory} = await chooseBrowser('open');
+        return {directory, root: await browserProjects!.root(project.id).catch(() => null) ?? directory};
     };
     const pickDirectory = devicePicker ?
-        (options: {id: string; mode: 'readwrite'}) => devicePicker.call(view, options) :
-        () => chooseBrowser('open');
-    const pickNewDirectory = (options: {id: string; mode: 'readwrite'}, title?: string) =>
-        devicePicker ? devicePicker.call(view, options) : chooseBrowser('create', title);
+        async (options: {id: string; mode: 'readwrite'}): Promise<Chosen> => ({directory: await devicePicker.call(view, options)}) :
+        chooseBrowserFolder;
+    const pickNewDirectory = async (options: {id: string; mode: 'readwrite'}, title?: string) =>
+        devicePicker ? devicePicker.call(view, options) : (await chooseBrowser('create', title)).directory;
     /** Runs `run` with the browser folder of `directory` locked against other tabs, and marks it as updated. */
     const withBrowserProject = async <T>(directory: FileSystemDirectoryHandle | null, run: () => Promise<T>) => {
         const project = directory && browserProjects ? await browserProjects.find(directory).catch(() => null) : null;
@@ -280,7 +285,7 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
         },
         openBrowser: devicePicker && browserProjects ? locale => {
             const message = messageFor(locale);
-            session.open(() => chooseBrowser('open'), () => view.confirm(message.replace))
+            session.open(chooseBrowserFolder, () => view.confirm(message.replace))
                 .then(result => {if (result === 'opened') report(message.opened);}, error => fail(locale, error)).finally(renderReload);
             renderReload();
         } : undefined,
@@ -303,6 +308,7 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
     menus.set(vm, menu);
     const unregister = registerFolder(vm, {
         get directory() {return session.directory;},
+        get root() {return session.root;},
         subscribe: listener => session.subscribe(listener),
         subscribeEdits: listener => session.subscribeEdits(listener),
         unsavedPaths: () => session.unsavedPaths(),
@@ -351,6 +357,11 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
          * detached. A host can tell projects apart by it, for example to keep the layout of each one.
          */
         get directory() {return session.directory;},
+        /**
+         * The folder the user chose for the loaded project, or `null` like `directory`. It is `directory` itself, or
+         * the repository whose `project` folder holds the project, or the stored folder of a folder kept in the browser.
+         */
+        get root() {return session.root;},
         dispose() {
             menus.delete(vm);
             unregister();

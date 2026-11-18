@@ -60,3 +60,23 @@ test('follows the folder mounted for a VM as it is mounted, opened, closed and d
     mountProjectFolder({vm, document, host}).dispose();
     assert.equal(seen.length, count, 'nothing is told after stopping');
 });
+
+test('tells the folder the user chose as root, next to the directory, and null while no folder is open', async () => {
+    const {vm, document, host, loadOther} = fakeEditor();
+    const seen = [];
+    const stop = followProjectFolder(vm, (folder, opened, root) => seen.push([opened?.name ?? null, root?.name ?? null]));
+    const folder = mountProjectFolder({vm, document, host});
+    assert.deepEqual(seen.at(-1), [null, null]);
+    assert.equal(await folder.openDirectory(directory, () => true), 'opened');
+    assert.deepEqual(seen.at(-1), ['Selected project', 'Selected project']);
+    assert.equal(folder.root, directory);
+    const repository = {name: 'Repository'};
+    assert.equal(await folder.openDirectory(directory, () => true, repository), 'opened');
+    assert.deepEqual(seen.at(-1), ['Selected project', 'Repository']);
+    assert.equal(folder.root, repository);
+    loadOther();
+    assert.deepEqual(seen.at(-1), [null, null]);
+    assert.equal(folder.root, null);
+    folder.dispose();
+    stop();
+});

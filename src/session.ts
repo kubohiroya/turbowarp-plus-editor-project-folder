@@ -1,5 +1,5 @@
 import {assetKey, assetTypeFor, assertFolderUnchanged, collapsePalette, encodePalette, expandPalette, extensionsFile, fileVersion,
-    equal, FolderError, manifestFile, paletteFile, parseProject, planExtensionSave, projectAssets, projectChanges, projectFile, readFolder,
+    equal, FolderError, manifestFile, paletteFile, parseProject, planExtensionSave, projectAssets, projectChanges, projectFile, readProjectFolder,
     readFolderUpdate, sameBytes, unsupported} from './source.js';
 import type {Asset, AssetKind, FolderSource, FolderUpdate, JsonObject, Project, Storage} from './source.js';
 import {applyBlockReload, planBlockReload} from './block-reload.js';
@@ -131,7 +131,9 @@ type Edits = {kind: 'values'; changes: ReturnType<typeof planBlockReload>} |
     {kind: 'scripts'; changes: ReturnType<typeof planScriptReload>};
 type PendingUpdate = {update: FolderUpdate; edits: Edits | null; stable: boolean};
 type Pending = PendingUpdate | 'structure' | 'waiting';
-type Session = {source: FolderSource; baseline: Project; ids: string[] | undefined; stage: object; pending: Pending | null};
+/** The folder to open, and the folder the user chose for it, which defaults to `directory`. */
+export type Chosen = {directory: FileSystemDirectoryHandle; root?: FileSystemDirectoryHandle};
+type Session = {source: FolderSource; root: FileSystemDirectoryHandle; baseline: Project; ids: string[] | undefined; stage: object; pending: Pending | null};
 /**
  * `ready`: the change can be applied in place: values and positions, or with `deserializeBlocks`, whole scripts. `full`: the change needs the whole project reloaded.
  * `waiting`: an external write looks incomplete and is checked again. `dirty`, `running` and `busy` hold the change.
@@ -274,20 +276,20 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
         unregisterTree?.();
     };
     const openFrom = async (
-        getDirectory: () => Promise<FileSystemDirectoryHandle | null>,
+        getDirectory: () => Promise<Chosen | null>,
         confirmReplace: () => boolean,
         prepare: (directory: FileSystemDirectoryHandle) => Promise<FolderSource | null> =
-            directory => readFolder(directory, vm.runtime.storage),
+            directory => readProjectFolder(directory, vm.runtime.storage),
         stillCurrent = () => true
     ): Promise<OpenResult> => {
         if (disposed || busy) return 'cancelled';
         busy = true;
         const priorStage = vm.runtime.getTargetForStage();
         try {
-            const directory = await getDirectory();
-            if (!directory || disposed) return 'cancelled';
+            const chosen = await getDirectory();
+            if (!chosen || disposed) return 'cancelled';
             const storage = vm.runtime.storage;
-            const source = await prepare(directory);
+            const source = await prepare(chosen.directory);
             if (!source || disposed || !stillCurrent() || vm.runtime.getTargetForStage() !== priorStage) return 'cancelled';
             if (host.isProjectDirty() && !confirmReplace()) return 'cancelled';
             host.beforeLoad();
@@ -296,6 +298,8 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
             const assets = source.storageAssets;
             reader.assets = assets;
             let stage: object | null;
+            // The project may be the `project` folder inside the chosen one.
+            const directory = source.directory;
             pendingTree = undefined;
             expectingTree = true;
             try {
@@ -307,9 +311,9 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
                 if (reader.assets === assets) reader.assets = null;
             }
             if (disposed || !stage || vm.runtime.getTargetForStage() !== stage) return 'cancelled';
-            host.onOpened(directory.name);
+            host.onOpened(chosen.directory.name);
             const baseline = snapshot();
-            setCurrent({source, stage, baseline, ids: identify(baseline), pending: null});
+            setCurrent({source, root: chosen.root ?? chosen.directory, stage, baseline, ids: identify(baseline), pending: null});
             // The tree may come with the load or right after it; once the folder is current, it is written there.
             expectingTree = false;
             if (pendingTree) writeExplorerState(directory, pendingTree, true);
@@ -432,6 +436,8 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
             return typeof pending === 'object' && pending !== null ? pending.update.version : null;
         },
         get directory() {return current?.source.directory ?? null;},
+        /** The folder the user chose: `directory` itself, or the repository whose `project` folder it is. */
+        get root() {return current?.root ?? null;},
         async mutate(directory: FileSystemDirectoryHandle, operation: (guard: () => void) => Promise<void>) {
             const session = current;
             if (!session || busy || session.source.directory !== directory) throw new FolderError('conflict');
@@ -528,9 +534,11 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
             if (!session || !session.pending || session.pending === 'waiting' || host.blockReload?.isRunning()) {
                 return Promise.resolve('cancelled');
             }
-            return openFrom(() => Promise.resolve(current === session ? session.source.directory : null), confirmReplace);
+            return openFrom(() => Promise.resolve(current === session ? {directory: session.source.directory, root: session.root} : null),
+                confirmReplace);
         },
-        open(pick: FileSystemPicker, confirmReplace: () => boolean): Promise<OpenResult> {
+        /** `pick` gives the folder to open and, when it differs, the folder the user chose as `root`. */
+        open(pick: (options: {id: string; mode: 'readwrite'}) => Promise<Chosen>, confirmReplace: () => boolean): Promise<OpenResult> {
             return openFrom(async () => {
                 try {
                     return await pick({id: 'turbowarp-plus-project-folder', mode: 'readwrite'});
@@ -540,8 +548,13 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
                 }
             }, confirmReplace);
         },
-        openDirectory(directory: FileSystemDirectoryHandle, confirmReplace: () => boolean): Promise<OpenResult> {
-            return openFrom(() => Promise.resolve(directory), confirmReplace);
+        /**
+         * Opens `directory`, or its `project` folder when it has no project of its own. `root` is the folder the user
+         * chose, for a host that located the project itself; it defaults to `directory`.
+         */
+        openDirectory(directory: FileSystemDirectoryHandle, confirmReplace: () => boolean,
+            root?: FileSystemDirectoryHandle): Promise<OpenResult> {
+            return openFrom(() => Promise.resolve({directory, root}), confirmReplace);
         },
         createFromSnapshot(selectDestination: () => Promise<{directory: FileSystemDirectoryHandle; overwrite: boolean} | null>,
             prepareFiles: () => Promise<ReadonlyMap<string, Uint8Array>>, isCurrent: () => boolean): Promise<OpenResult> {
@@ -553,7 +566,7 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
             return openFrom(async () => {
                 const destination = await selectDestination();
                 overwrite = destination?.overwrite ?? false;
-                return destination?.directory ?? null;
+                return destination ? {directory: destination.directory} : null;
             }, currentProject, async directory => {
                 if (!currentProject()) return null;
                 savedRevision = revision;

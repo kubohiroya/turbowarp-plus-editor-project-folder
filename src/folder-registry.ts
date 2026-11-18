@@ -3,10 +3,12 @@ export type ExplorerMutation = (guard: () => void) => Promise<void>;
 
 export interface FollowedFolder {
     readonly directory: FileSystemDirectoryHandle | null;
+    /** The folder the user chose for `directory`: itself, or the repository whose `project` folder it is. */
+    readonly root?: FileSystemDirectoryHandle | null;
     subscribe(listener: () => void): () => void;
     subscribeEdits(listener: () => void): () => void;
     unsavedPaths(): ReadonlySet<string> | null;
-    /** Asks for a folder and opens it, as the File menu's Open Project Folder… does. */
+    /** Asks for a folder and opens it, as the File menu's Open Folder… does. */
     open(locale: string): void;
     mutate(directory: FileSystemDirectoryHandle, operation: ExplorerMutation): Promise<void>;
 }
@@ -25,11 +27,13 @@ export function registerFolder(vm: object, folder: FollowedFolder) {
 }
 
 /**
- * Calls `listener` with the project folder mounted for `vm` and the directory open in it, now and whenever a folder is
- * mounted, opened, closed or saved. Returns the function that stops it.
+ * Calls `listener` with the project folder mounted for `vm`, the directory open in it and the folder the user chose for
+ * it (`root`, the directory itself or the repository that holds it in `project/`), now and whenever a folder is
+ * mounted, opened, closed or saved. `directory` and `root` are `null` while no folder is open. Returns the function
+ * that stops it.
  */
-export function followProjectFolder(vm: object,
-    listener: (folder: FollowedFolder | undefined, directory: FileSystemDirectoryHandle | null) => void) {
+export function followProjectFolder(vm: object, listener: (folder: FollowedFolder | undefined,
+    directory: FileSystemDirectoryHandle | null, root: FileSystemDirectoryHandle | null) => void) {
     let unsubscribe = () => {};
     let followed: FollowedFolder | undefined;
     const update = () => {
@@ -37,9 +41,9 @@ export function followProjectFolder(vm: object,
         if (folder !== followed) {
             unsubscribe();
             followed = folder;
-            unsubscribe = folder ? folder.subscribe(() => listener(folder, folder.directory)) : () => {};
+            unsubscribe = folder ? folder.subscribe(() => listener(folder, folder.directory, folder.root ?? null)) : () => {};
         }
-        listener(folder, folder?.directory ?? null);
+        listener(folder, folder?.directory ?? null, folder?.root ?? null);
     };
     registrations.add(update);
     update();

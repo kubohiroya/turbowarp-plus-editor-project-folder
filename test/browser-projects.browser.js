@@ -87,5 +87,12 @@ for (const [name, launch, withoutPicker] of engines) {
         assert.deepEqual(await page.evaluate(() => subject.projects.list()), []);
         await openDialog.getByRole('button', {name: '閉じる'}).click();
         await expect(openDialog).toHaveCount(0);
+
+        // A repository kept in the browser opens its project/ folder, and the stored folder is the root.
+        const repository = await page.evaluate(() => subject.createRepository('リポジトリ'));
+        await page.evaluate(() => subject.actions().open());
+        await openDialog.locator(`[data-browser-project="${repository}"]`).getByRole('button', {name: '開く'}).click();
+        await expect.poll(() => page.evaluate(id => subject.openedFrom(id), repository))
+            .toEqual({directory: true, root: true, name: 'project'});
     });
 }
