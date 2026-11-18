@@ -31,12 +31,13 @@ function memoryDirectory(name) {
         async getFileHandle(child, options) {
             return handle(child, 'file', options, () => {
                 let data = new Uint8Array();
+                let modified = 0;
                 return {
                     name: child, kind: 'file', async isSameEntry(other) {return this === other;},
-                    async getFile() {return new File([data], child);},
+                    async getFile() {return new File([data], child, {lastModified: modified});},
                     async createWritable() {
                         let next;
-                        return {async write(value) {next = value;}, async abort() {}, async close() {data = next;}};
+                        return {async write(value) {next = value;}, async abort() {}, async close() {data = next; modified++;}};
                     }
                 };
             });
