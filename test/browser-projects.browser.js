@@ -131,17 +131,29 @@ for (const [name, launch, withoutPicker, browserStorage] of engines) {
         await expect.poll(() => page.evaluate(id => subject.openedFrom(id), second.id))
             .toEqual({directory: true, root: true, name: second.id});
 
-        // A folder kept with the old layout, its project in project/, is no project folder: the error dialog tells so
-        // and the open project stays.
+        // A folder kept with the old layout, its project in project/: opening it moves the project to the root, next to
+        // .git, records that, and opens it there.
         const repository = await page.evaluate(() => subject.createOldLayout('リポジトリ'));
         await page.evaluate(() => subject.actions().openBrowser());
         await openDialog.locator(`[data-browser-project="${repository}"]`).getByRole('button', {name: '開く'}).click();
+        await expect.poll(() => page.evaluate(id => subject.openedFrom(id), repository))
+            .toEqual({directory: true, root: true, name: repository});
+        assert.deepEqual(await page.evaluate(id => subject.rootNames(id), repository),
+            ['.git', 'embedded-extensions.json', 'project.source.json', 'sb3-source.json']);
+        assert.equal((await page.evaluate(() => subject.projects.list())).find(entry => entry.id === repository).projectPath, '');
+
+        // When a name in project/ is already taken at the root, nothing moves: the folder is no project folder, the
+        // error dialog tells so and the open project stays.
+        const clashing = await page.evaluate(() => subject.createOldLayout('重なるリポジトリ', true));
+        await page.evaluate(() => subject.actions().openBrowser());
+        await openDialog.locator(`[data-browser-project="${clashing}"]`).getByRole('button', {name: '開く'}).click();
         const error = page.getByRole('alertdialog', {name: 'フォルダを開けません'});
         await expect(error).toContainText('このフォルダはプロジェクトフォルダではありません。');
         await expect(error.getByRole('button', {name: 'OK'})).toBeFocused();
         await error.getByRole('button', {name: 'OK'}).click();
         await expect(error).toHaveCount(0);
-        assert.deepEqual(await page.evaluate(id => subject.openedFrom(id), second.id), {directory: true, root: true, name: second.id});
+        assert.deepEqual(await page.evaluate(id => subject.openedFrom(id), repository), {directory: true, root: true, name: repository});
+        assert.deepEqual(await page.evaluate(id => subject.rootNames(id), clashing), ['.git', 'embedded-extensions.json', 'project']);
     });
 }
 

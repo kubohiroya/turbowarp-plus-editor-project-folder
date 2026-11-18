@@ -40,11 +40,12 @@ globalThis.setup = async ({project, withoutPicker, browserStorage = 'fallback', 
         runtime, folder, projects,
         actions: () => projectFolderActions(runtime.vm, locale),
         create: (title, location) => subject.created = folder.createFromSnapshot({prepareFiles: async () => files, title, location}),
-        // A folder kept in the browser by an earlier version, a repository with the project in project/. The project
-        // must be at the root now, so this is no project folder.
-        async createOldLayout(title) {
+        // A folder kept in the browser by an earlier version, a repository with the project in project/. With `clash`,
+        // the root already has a file named as one in project/.
+        async createOldLayout(title, clash = false) {
             const created = await projects.create(title, {projectPath: 'project'});
             await created.root.getDirectoryHandle('.git', {create: true});
+            if (clash) await created.root.getFileHandle('embedded-extensions.json', {create: true});
             for (const [name, bytes] of files) {
                 const writable = await (await created.directory.getFileHandle(name, {create: true})).createWritable();
                 await writable.write(bytes);
@@ -58,6 +59,12 @@ globalThis.setup = async ({project, withoutPicker, browserStorage = 'fallback', 
             if (!folder.directory || !folder.root) return null;
             return {directory: await root.isSameEntry(folder.directory), root: await root.isSameEntry(folder.root),
                 name: folder.directory.name};
+        },
+        /** The names at the root of the stored folder of `id`, sorted. */
+        async rootNames(id) {
+            const names = [];
+            for await (const name of (await projects.root(id)).keys()) names.push(name);
+            return names.sort();
         },
         async storedProject(id) {
             const directory = await projects.directory(id);

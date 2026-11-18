@@ -222,8 +222,10 @@ export function chooseBrowserProject({document, projects, locale = 'en', purpose
                     return element;
                 };
                 item.append(text,
-                    // The project is at the root of the stored folder, as on the device.
+                    // The project is at the root of the stored folder, as on the device. A folder kept by an earlier
+                    // version, with its project in project/, moves it there first.
                     button(message.open, async () => {
+                        await projects.moveProjectToRoot(project.id);
                         const directory = await projects.root(project.id);
                         if (!directory) return render();
                         finish({project, directory});
