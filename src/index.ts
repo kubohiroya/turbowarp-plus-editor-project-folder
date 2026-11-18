@@ -1,6 +1,6 @@
 import {FolderError} from './source.js';
 import {createFolderSession} from './session.js';
-import {isProjectFolderEmpty} from './create-folder.js';
+import {createProjectFolder, isProjectFolderEmpty} from './create-folder.js';
 import {registerFolder} from './folder-registry.js';
 import type {ProjectFolderLocation} from './folder-registry.js';
 import {openBrowserProjects} from './browser-projects.js';
@@ -43,7 +43,8 @@ const messages = {
         dirty: 'You have unsaved edits.', running: 'Stop the project before reloading.',
         runningAuto: 'The changes load when the project stops.', busy: 'Please wait for the current operation.',
         waiting: 'Waiting for the external write to finish.',
-        full: 'These changes need the whole project to be reloaded.'
+        full: 'These changes need the whole project to be reloaded.',
+        notEmpty: 'Choose an empty folder.'
     },
     ja: {
         open: 'フォルダを開く…', save: 'プロジェクトフォルダに保存', openBrowser: 'ブラウザーに保存したフォルダを開く…',
@@ -65,7 +66,8 @@ const messages = {
         dirty: '未保存の編集があります。', running: '作品を停止してから再読み込みできます。',
         runningAuto: '作品の停止後に反映します。', busy: '処理が終わるまでお待ちください。',
         waiting: '外部の書き込みが終わるのを待っています。',
-        full: 'この変更は作品全体の再読み込みが必要です。'
+        full: 'この変更は作品全体の再読み込みが必要です。',
+        notEmpty: '空のフォルダを選んでください。'
     }
 };
 
@@ -109,6 +111,13 @@ export interface OpenDirectoryOptions {
     locale?: string;
 }
 
+/**
+ * Where `createFromSnapshot` and `copyToFolder` write: `browser` for a new folder in the browser's own storage, or a
+ * folder on the device that the host already picked, for example with `pickEmptyFolder`.
+ */
+export type ProjectFolderDestination = 'browser' | FileSystemDirectoryHandle;
+
+const folderPickerId = 'turbowarp-plus-project-folder';
 const abort = () => new DOMException('The user closed the dialog', 'AbortError');
 
 /**
@@ -130,7 +139,11 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
         return choice;
     };
     // The stored folder is opened as a whole, so it is its own root, as a folder on the device is.
-    const chooseBrowserFolder = async (): Promise<Chosen> => ({directory: (await chooseBrowser('open')).directory});
+    const chooseBrowserFolder = async (): Promise<Chosen> => {
+        const {directory} = await chooseBrowser('open');
+        browserRoots.add(directory);
+        return {directory};
+    };
     const pickDirectory = devicePicker ?
         async (options: {id: string; mode: 'readwrite'}): Promise<Chosen> => ({directory: await devicePicker.call(view, options)}) :
         chooseBrowserFolder;
@@ -152,6 +165,32 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
             return result;
         });
     };
+    // The stored folders of the browser that were opened or created here, so `location` can answer without waiting.
+    const browserRoots = new WeakSet<FileSystemDirectoryHandle>();
+    const classify = async (handle: FileSystemDirectoryHandle) => {
+        if (browserProjects && await browserProjects.find(handle).catch(() => null)) browserRoots.add(handle);
+    };
+    /**
+     * Runs `run` on a new folder in the browser's storage named `title`, and removes the folder again unless `keep`
+     * says the result is worth keeping, also when `run` throws.
+     */
+    const withNewBrowserFolder = async <T>(title: string | undefined, run: (root: FileSystemDirectoryHandle) => Promise<T>,
+        keep: (result: T) => boolean) => {
+        if (!browserProjects) throw new FolderError('unsupported');
+        const project = await browserProjects.create(title || 'Project', {projectPath: ''});
+        browserRoots.add(project.root);
+        let kept = false;
+        try {
+            const result = await run(project.root);
+            kept = keep(result);
+            return result;
+        } finally {
+            if (!kept) await browserProjects.remove(project.id).catch(() => {});
+        }
+    };
+    const overwriteMessage = () => locale.startsWith('ja') ?
+        '指定されたフォルダは空ではありません。フォルダに保存されている内容が上書きされる場合があります。よろしいですか？' :
+        'The selected folder is not empty. Contents in the folder may be overwritten. Continue?';
     const session = createFolderSession(vm, host);
     const status = document.createElement('output');
     status.dataset.projectFolderStatus = '';
@@ -354,7 +393,7 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
          */
         openDirectory: (directory: FileSystemDirectoryHandle, confirmReplace: () => boolean,
             root?: FileSystemDirectoryHandle | null, options: OpenDirectoryOptions = {}): Promise<OpenResult> =>
-            session.openDirectory(directory, confirmReplace, root ?? undefined).then(result => {
+            classify(root ?? directory).then(() => session.openDirectory(directory, confirmReplace, root ?? undefined)).then(result => {
                 if (result === 'not-project' && options.notProjectDialog !== false) void notProject(options.locale ?? locale);
                 return result;
             }).finally(renderReload),
@@ -365,10 +404,14 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
         /** The folders kept in this browser, when they are offered, for a host that lists or exports them. */
         browserProjects,
         /**
-         * Creates a project folder from a snapshot. `title` names a folder made in the browser, where the user names a
-         * new folder instead of picking one on the device.
+         * Creates a project folder from a snapshot and opens it. `destination` writes to a new folder in the browser's
+         * storage (`browser`, named by `title`; it is removed again unless the project opens from it) or to a folder the
+         * host picked on the device (see `pickEmptyFolder`). Without it, `directory` is the folder the host picked, and
+         * otherwise `location` (or the device picker where there is one) asks the user: `title` then names a folder
+         * made in the browser, where the user names a new folder instead of picking one. A folder that is not empty is
+         * overwritten only when the user confirms it.
          */
-        createFromSnapshot({prepareFiles, collectEdits, directory, current = () => true, title, location}: {
+        createFromSnapshot({prepareFiles, collectEdits, directory, current = () => true, title, location, destination}: {
             prepareFiles: () => Promise<ReadonlyMap<string, Uint8Array>>;
             collectEdits?: () => Promise<void>;
             directory?: FileSystemDirectoryHandle;
@@ -376,16 +419,15 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
             title?: string;
             /** Explicit destination; omitted uses the device picker when available. */
             location?: ProjectFolderLocation;
-        }) {
-            const message = locale.startsWith('ja') ?
-                '指定されたフォルダは空ではありません。フォルダに保存されている内容が上書きされる場合があります。よろしいですか？' :
-                'The selected folder is not empty. Contents in the folder may be overwritten. Continue?';
-            return session.createFromSnapshot(async () => {
+            destination?: ProjectFolderDestination;
+        }): Promise<OpenResult> {
+            const create = (picked?: FileSystemDirectoryHandle) => session.createFromSnapshot(async () => {
                 try {
-                    const selected = directory ?? await pickNewDirectory({id: 'turbowarp-plus-project-folder', mode: 'readwrite'}, title, location);
+                    const selected = picked ?? await pickNewDirectory({id: folderPickerId, mode: 'readwrite'}, title, location);
                     if (!current()) return null;
+                    await classify(selected);
                     const overwrite = !await isProjectFolderEmpty(selected);
-                    if (!current() || (overwrite && !view.confirm(message))) return null;
+                    if (!current() || (overwrite && !view.confirm(overwriteMessage()))) return null;
                     await collectEdits?.();
                     return current() ? {directory: selected, overwrite} : null;
                 } catch (error) {
@@ -393,7 +435,79 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
                     throw error;
                 }
             }, prepareFiles, current).finally(renderReload);
+            if (destination === 'browser') return withNewBrowserFolder(title, create, result => result === 'opened');
+            return create(destination ?? directory);
         },
+        /**
+         * Writes a project folder from a snapshot to `destination` and leaves the open project as it is: nothing is
+         * opened or attached, `directory` and `root` stay, and `followProjectFolder` listeners are not called (Save a
+         * Copy). `browser` makes a new folder in the browser's storage named by `title`, removed again when nothing is
+         * written; a folder on the device that is not empty is overwritten only when the user confirms it. Resolves
+         * with the folder written, or `null` when the user declined or `current()` turned false.
+         */
+        async copyToFolder({destination, prepareFiles, collectEdits, current = () => true, title}: {
+            destination: ProjectFolderDestination;
+            prepareFiles: () => Promise<ReadonlyMap<string, Uint8Array>>;
+            collectEdits?: () => Promise<void>;
+            current?: () => boolean;
+            title?: string;
+        }): Promise<FileSystemDirectoryHandle | null> {
+            const write = async (target: FileSystemDirectoryHandle, isNew: boolean) => {
+                try {
+                    const overwrite = !isNew && !await isProjectFolderEmpty(target);
+                    if (!current() || (overwrite && !view.confirm(overwriteMessage()))) return null;
+                    await collectEdits?.();
+                    if (!current()) return null;
+                    const files = await prepareFiles();
+                    if (!current()) return null;
+                    await createProjectFolder({directory: target, files, storage: vm.runtime.storage, overwrite, current});
+                    return target;
+                } catch (error) {
+                    if (error instanceof DOMException && error.name === 'AbortError') return null;
+                    throw error;
+                }
+            };
+            if (destination === 'browser') return withNewBrowserFolder(title, root => write(root, true), result => result !== null);
+            return write(destination, false);
+        },
+        /**
+         * Asks the user for an empty folder on the device, for a new project. Call it while handling the user's click,
+         * as the browser lets the folder picker open only then. Resolves with `null` when the user cancelled, or chose
+         * a folder that is not empty, which the status line then tells (“Choose an empty folder.”). Rejects with
+         * `unsupported` where the browser cannot pick folders on the device.
+         */
+        async pickEmptyFolder({locale: language = locale, id = folderPickerId}: {locale?: string; id?: string} = {}) {
+            if (!devicePicker) throw new FolderError('unsupported');
+            let picked: FileSystemDirectoryHandle;
+            try {
+                picked = await devicePicker.call(view, {id, mode: 'readwrite'});
+            } catch (error) {
+                if (error instanceof DOMException && error.name === 'AbortError') return null;
+                throw error;
+            }
+            if (await isProjectFolderEmpty(picked)) return picked;
+            report(messageFor(language).notEmpty);
+            return null;
+        },
+        /**
+         * Gives the open folder the title `title` in the list of folders kept in this browser. Resolves with `false`,
+         * changing nothing, when no folder is open or the open folder is not kept in this browser: a folder on the
+         * device keeps its name, as the browser cannot rename it.
+         */
+        async renameCurrentBrowserFolder(title: string) {
+            const root = session.root;
+            const entry = root && browserProjects ? await browserProjects.find(root).catch(() => null) : null;
+            if (!entry || session.root !== root) return false;
+            await browserProjects!.rename(entry.id, title);
+            return true;
+        },
+        /** Where the open folder is: `browser` for a folder kept in this browser, `device`, or `null` with none open. */
+        get location(): ProjectFolderLocation | null {
+            const root = session.root;
+            return root ? (browserRoots.has(root) ? 'browser' : 'device') : null;
+        },
+        /** Where new project folders can be made: `device` with the folder picker, and `browser` with the browser's folders. */
+        locations: locations as readonly ProjectFolderLocation[],
         /**
          * The folder the loaded project came from, or `null` once another project loaded or the folder was
          * detached. A host can tell projects apart by it, for example to keep the layout of each one.

@@ -37,6 +37,36 @@ Safari と Firefox にはフォルダ選択（`showDirectoryPicker`）があり�
 
 保存先選択の導入は、このパッケージを先に公開し、Editor の依存をその版へ固定してからホストの結線を反映します。切り戻すときは Editor の結線と依存の固定を一緒に戻します。OPFS に作成済みの作品は削除せず、ブラウザー内の一覧から開く・ZIP で書き出す経路を維持します。
 
+## フォルダの作成・写し・改名
+
+新しい作品を作る、写しを保存する、作品名を変えるホストは、自前の補助関数の代わりに、マウントしたセッションの次のメンバーを使います。[Editor の issue #679](https://github.com/kubohiroya/turbowarp-plus-editor/issues/679) を参照してください。
+
+```ts
+type ProjectFolderDestination = 'browser' | FileSystemDirectoryHandle;
+createFromSnapshot({prepareFiles, collectEdits?, current?, title?, destination?, directory?, location?}): Promise<OpenResult>;
+copyToFolder({destination, prepareFiles, collectEdits?, current?, title?}): Promise<FileSystemDirectoryHandle | null>;
+pickEmptyFolder({locale?, id?}?): Promise<FileSystemDirectoryHandle | null>;
+renameCurrentBrowserFolder(title: string): Promise<boolean>;
+readonly location: 'browser' | 'device' | null;
+readonly locations: readonly ('device' | 'browser')[];
+```
+
+- `createFromSnapshot({destination})` は、新しいプロジェクトフォルダを作成先に書き、`destination` がないときと同じく開きます。`'browser'` はブラウザーの保存領域に `browserProjects.create(title, {projectPath: ''})` で新しいフォルダを作り（`title` の既定は `Project`）、そこから作品が開かなかったとき、つまりユーザーが断ったとき、`current()` が偽になったとき、準備や書き込みに失敗したときには、そのフォルダを消します。ディレクトリのハンドルは、ホストが端末で選んだフォルダです。フォルダ選択は開きません。空でないフォルダは、これまでどおりユーザーが確かめたときだけ上書きします。ブラウザー内のフォルダが使えないときの `'browser'` は、`prepareFiles` を呼ぶ前に `unsupported` で失敗します。`destination` がなければ、`directory` と `location` はこれまでどおりです。
+- `copyToFolder({destination, title, prepareFiles})` は、プロジェクトフォルダを書くだけで開きません（プロジェクトのコピーを保存）。開いている作品、`directory`・`root`・`location` は変わらず、`followProjectFolder` の listener も呼びません。`collectEdits`、`prepareFiles` の順に呼び、`createProjectFolder` で書いて、書いたフォルダを返します。`'browser'` は `title` という名前の新しいフォルダを作り、何も書かなかったときは消します。端末の空でないフォルダは、ユーザーが確かめたときだけ上書きします。ユーザーが断ったときや `current()` が偽になったときは、何も書かずに `null` を返します。
+- `pickEmptyFolder({locale, id})` は端末のフォルダ選択（`showDirectoryPicker({id, mode: 'readwrite'})`、`id` の既定は `turbowarp-plus-project-folder`）を開き、空のフォルダならそれを返します。ユーザーが取り消したときと、空でないフォルダを選んだときは `null` を返し、後者では状態表示に「空のフォルダを選んでください。」（英語では “Choose an empty folder.”）を `locale` の言語で出します。ブラウザーはクリックの処理中にしかフォルダ選択を開かないので、クリックを処理している間に呼びます。端末のフォルダを選べないブラウザーでは `unsupported` で失敗します。
+- `renameCurrentBrowserFolder(title)` は、開いているフォルダの、このブラウザーのフォルダ一覧での名前を `title` にし（`browserProjects.find` と `rename`）、`true` を返します。フォルダが開いていないときや、開いているのが端末のフォルダのとき（ブラウザーからは名前を変えられません）は、何も変えずに `false` を返します。
+- `location` は開いているフォルダの場所です。このブラウザー内なら `browser`、それ以外は `device`、開いていなければ `null` です。`locations` は新しいフォルダを作れる場所の一覧で、`followProjectFolder` が伝えるものと同じです。
+
+自前の補助関数を持つホストは、次のように置き換えます。
+
+| ホストの補助関数 | 置き換え先 |
+| --- | --- |
+| ホストが新しいブラウザー内のフォルダを作って消す `createFolder(…, destination)` | `createFromSnapshot({destination, title, prepareFiles, collectEdits, current})` |
+| 選んだフォルダや新しいブラウザー内のフォルダに `createProjectFolder` で書くコピーの保存 | `copyToFolder({destination, title, prepareFiles, collectEdits, current})` |
+| 空でないフォルダを断るフォルダ選択 | `pickEmptyFolder({locale})` |
+| ホストが自分で調べた `{browser, device}` | `locations.includes('browser')`、`locations.includes('device')` |
+| 作品名の変更後の `browserProjects.find(root)` と `rename` | `renameCurrentBrowserFolder(title)`。`false` ならフォルダ名は変わりません |
+
 ## 0.17.0 の後の互換性のない変更: 作品はフォルダのルートに置く
 
 0.16.0 では、選んだフォルダの直下に作品がないとき、その中の `project` フォルダの作品を開きました（Project Starter が作るリポジトリの形）。この切り替えはなくしました。一つの Git リポジトリには一つの作品を、そのルートに置きます。

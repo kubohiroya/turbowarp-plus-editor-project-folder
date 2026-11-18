@@ -37,6 +37,36 @@ Safari and Firefox have no folder picker (`showDirectoryPicker`). In these brows
 
 The browser may delete these folders when site data is cleared or the site is not used for a while (seven days in Safari). Creating the first folder asks for `navigator.storage.persist()`, which is not a guarantee. The dialog tells the user to export a ZIP or push to GitHub with Git to keep a copy.
 
+## Creating, copying and renaming folders
+
+A host that makes new projects, saves copies or renames projects uses these members of the mounted session instead of its own helpers. See [Editor issue #679](https://github.com/kubohiroya/turbowarp-plus-editor/issues/679).
+
+```ts
+type ProjectFolderDestination = 'browser' | FileSystemDirectoryHandle;
+createFromSnapshot({prepareFiles, collectEdits?, current?, title?, destination?, directory?, location?}): Promise<OpenResult>;
+copyToFolder({destination, prepareFiles, collectEdits?, current?, title?}): Promise<FileSystemDirectoryHandle | null>;
+pickEmptyFolder({locale?, id?}?): Promise<FileSystemDirectoryHandle | null>;
+renameCurrentBrowserFolder(title: string): Promise<boolean>;
+readonly location: 'browser' | 'device' | null;
+readonly locations: readonly ('device' | 'browser')[];
+```
+
+- `createFromSnapshot({destination})` writes the new project folder to the destination and opens it, as without `destination`. `'browser'` makes a new folder in the browser's storage with `browserProjects.create(title, {projectPath: ''})` (`title` defaults to `Project`) and removes it again unless the project opens from it: when the user declines, `current()` turns false, or preparing or writing fails. A directory handle is a folder the host picked on the device; no picker opens. A folder that is not empty is overwritten only when the user confirms it, as before. `'browser'` without the browser's folders rejects with `unsupported` before `prepareFiles` runs. Without `destination`, `directory` and `location` work as before.
+- `copyToFolder({destination, title, prepareFiles})` writes a project folder and does not open it (Save a Copy): the open project, `directory`, `root` and `location` stay, and `followProjectFolder` listeners are not called. It calls `collectEdits` and then `prepareFiles`, writes with `createProjectFolder`, and resolves with the folder written. `'browser'` makes a new folder named `title`, removed again when nothing is written. A folder on the device that is not empty is overwritten only when the user confirms it; when the user declines or `current()` turns false, it resolves with `null` and writes nothing.
+- `pickEmptyFolder({locale, id})` opens the device's folder picker (`showDirectoryPicker({id, mode: 'readwrite'})`, `id` defaults to `turbowarp-plus-project-folder`) and resolves with the folder when it is empty. It resolves with `null` when the user cancelled, and when the folder is not empty, which the status line tells as “Choose an empty folder.” (Japanese: 「空のフォルダを選んでください。」) in `locale`. Call it while handling the user's click, because the browser opens the picker only then. Where the browser cannot pick folders on the device it rejects with `unsupported`.
+- `renameCurrentBrowserFolder(title)` gives the open folder the title in the list of folders kept in this browser (`browserProjects.find` and `rename`) and resolves with `true`. It resolves with `false` and changes nothing when no folder is open or the open folder is on the device, whose name the browser cannot change.
+- `location` is where the open folder is: `browser` for a folder kept in this browser, `device` for another, and `null` while none is open. `locations` lists where new folders can be made, as `followProjectFolder` reports it.
+
+A host that had its own helpers replaces them like this:
+
+| Host helper | Replacement |
+| --- | --- |
+| `createFolder(…, destination)` with a new browser folder made and removed by the host | `createFromSnapshot({destination, title, prepareFiles, collectEdits, current})` |
+| Save a Copy writing with `createProjectFolder` into a picked or new browser folder | `copyToFolder({destination, title, prepareFiles, collectEdits, current})` |
+| A picker that refuses a folder that is not empty | `pickEmptyFolder({locale})` |
+| `{browser, device}` from the host's own checks | `locations.includes('browser')`, `locations.includes('device')` |
+| `browserProjects.find(root)` and `rename` after the title changes | `renameCurrentBrowserFolder(title)`; `false` means the folder keeps its name |
+
 ## Breaking change after 0.17.0: the project is at the folder's root
 
 0.16.0 opened the `project` folder of a chosen folder that had no project of its own, as in a repository made by Project Starter. That fallback is removed: one Git repository holds one project, at its root.
