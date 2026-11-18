@@ -25,8 +25,8 @@ Folders can contain embedded extension scripts and custom extension URLs. Openin
 Safari and Firefox have no folder picker (`showDirectoryPicker`). In these browsers, project folders live in the browser's own storage, the origin private file system (OPFS). They are read and saved the same way as folders on the device. See [Editor issue #660](https://github.com/kubohiroya/turbowarp-plus-editor/issues/660).
 
 - `browserStorage` of `mountProjectFolder` chooses how they are used.
-  - `fallback` (default): only in browsers without the folder picker. **Open Folder…** lists the folders in the browser, and `createFromSnapshot` asks for the name of a new folder (`title` gives the initial name).
-  - `always`: also in browsers with the folder picker. The File menu gets **Open Folder Saved in This Browser…**, and `projectFolderActions(vm).openBrowser` opens it too.
+  - `fallback` (default): only in browsers without the folder picker (Safari, Firefox). The File menu shows **Open Folder…** as unavailable, with a note that this browser cannot open folders on the device, and offers **Open Folder Saved in This Browser…**, which lists the folders in the browser. `projectFolderActions(vm)` reports this as `deviceFolders: false`, so a host's own menu can do the same; its `open` still falls back to the browser's folders for hosts that call it. `createFromSnapshot` asks for the name of a new folder (`title` gives the initial name).
+  - `always`: also in browsers with the folder picker. The File menu gets **Open Folder Saved in This Browser…** next to **Open Folder…**, and `projectFolderActions(vm).openBrowser` opens it too.
   - `off`: never.
 - The dialog opens, exports as a ZIP, and deletes the folders. It shows how much storage is used and whether the browser keeps it (`persisted`). Its close button is an X icon named in the display language.
 - A folder lives at `turbowarp-plus/projects/<id>/`, and its name and times at `turbowarp-plus/project-info/<id>.json`, outside the folder, so Git never tracks them. With `projectPath`, the project folder can sit below the repository root, such as `project`.
