@@ -27,6 +27,24 @@ globalThis.setup = async ({project, withoutPicker}) => {
         runtime, folder, projects,
         actions: () => projectFolderActions(runtime.vm, 'ja'),
         create: title => {subject.created = folder.createFromSnapshot({prepareFiles: async () => files, title});},
+        // A repository kept in the browser, with the project in project/ as Project Starter makes it.
+        async createRepository(title) {
+            const created = await projects.create(title, {projectPath: 'project'});
+            await created.root.getDirectoryHandle('.git', {create: true});
+            for (const [name, bytes] of files) {
+                const writable = await (await created.directory.getFileHandle(name, {create: true})).createWritable();
+                await writable.write(bytes);
+                await writable.close();
+            }
+            return created.id;
+        },
+        /** Whether the open folder is the project folder of `id` and its root the stored folder. */
+        async openedFrom(id) {
+            const [root, directory] = await Promise.all([projects.root(id), projects.directory(id)]);
+            if (!folder.directory || !folder.root) return null;
+            return {directory: await directory.isSameEntry(folder.directory), root: await root.isSameEntry(folder.root),
+                name: folder.directory.name};
+        },
         async storedProject(id) {
             const directory = await projects.directory(id);
             return JSON.parse(await (await (await directory.getFileHandle('project.source.json')).getFile()).text());

@@ -57,7 +57,7 @@ const messages = {
     en: {
         label: 'Project folder', loading: 'Loading…', empty: 'This folder is empty.', noMatches: 'No matching files.',
         results: 'Matching files',
-        noFolder: 'Open a project folder to show its files here.', open: 'Open Project Folder…',
+        noFolder: 'Open a folder to show its files here.', open: 'Open Folder…',
         create: 'Create Project Folder', creating: 'Creating project folder…',
         createFailed: 'Could not create the project folder.',
         unavailable: 'File tabs are unavailable in this editor layout.',
@@ -77,7 +77,7 @@ const messages = {
     ja: {
         label: '作品フォルダ', loading: '読み込んでいます…', empty: 'このフォルダは空です。', noMatches: '該当するファイルはありません。',
         results: '検索結果',
-        noFolder: 'プロジェクトフォルダを開くと、ここにファイルを表示します。', open: 'プロジェクトフォルダを開く…',
+        noFolder: 'フォルダを開くと、ここにファイルを表示します。', open: 'フォルダを開く…',
         create: 'プロジェクトフォルダを作成', creating: 'プロジェクトフォルダを作成しています…',
         createFailed: 'プロジェクトフォルダを作成できませんでした。',
         unavailable: 'このエディターのレイアウトではファイルをタブで開けません。',

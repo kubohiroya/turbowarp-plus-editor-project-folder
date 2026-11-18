@@ -374,6 +374,46 @@ export async function readFolder(directory: FileSystemDirectoryHandle, storage: 
         palette: paletteDocument};
 }
 
+/** The project folder inside a repository, as Project Starter makes it. */
+export const projectSubfolder = 'project';
+
+const missingEntry = (error: unknown) => error instanceof DOMException && ['NotFoundError', 'TypeMismatchError'].includes(error.name);
+/** Whether `directory` has an entry called `name`, a file or a folder. */
+async function hasEntry(directory: FileSystemDirectoryHandle, name: string) {
+    for (const get of [() => directory.getFileHandle(name), () => directory.getDirectoryHandle(name)]) {
+        try {
+            await get();
+            return true;
+        } catch (error) {
+            if (!missingEntry(error)) throw error;
+        }
+    }
+    return false;
+}
+
+/**
+ * Reads the project in `directory`, or, when the folder has no project of its own, in its `project` folder, as in a
+ * repository whose project sits in `project/`. That folder must not be a repository itself. The error is the one
+ * for `directory` when neither holds a project.
+ */
+export async function readProjectFolder(directory: FileSystemDirectoryHandle, storage: Storage): Promise<FolderSource> {
+    try {
+        return await readFolder(directory, storage);
+    } catch (error) {
+        const child = await (async () => {
+            if (await hasEntry(directory, projectFile) || await hasEntry(directory, manifestFile)) return null;
+            const found = await directory.getDirectoryHandle(projectSubfolder);
+            return await hasEntry(found, '.git') ? null : found;
+        })().catch(() => null);
+        if (!child) throw error;
+        try {
+            return await readFolder(child, storage);
+        } catch {
+            throw error;
+        }
+    }
+}
+
 export const sameBytes = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((value, index) => value === b[index]);
 
 export type FolderUpdate = {version: string; bytes: Uint8Array; project: Project};
