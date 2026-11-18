@@ -71,8 +71,8 @@ color:var(--text-primary,inherit);box-shadow:0 3px 15px rgba(0,0,0,.2);font:inhe
 border-radius:.3rem;background:var(--ui-secondary,#eee);padding:.4rem .6rem;cursor:pointer}
 .twpf-external-card button:disabled{opacity:.55;cursor:default}
 .twpf-file-toolbar{position:absolute;z-index:5;top:.5rem;right:1.25rem;display:flex;flex-wrap:wrap;
-justify-content:flex-end;gap:.4rem;max-width:calc(100% - 2rem);padding:.3rem;border-radius:.5rem;
-background:var(--ui-primary,#fff);box-shadow:0 1px 6px rgba(0,0,0,.18);opacity:.94}
+justify-content:flex-end;gap:.4rem;max-width:calc(100% - 2rem)}
+.twpf-text-file .twpf-file-toolbar>button{background:var(--ui-primary,#fff)}
 .twpf-diff-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:.4rem;padding:.5rem .7rem;
 border-bottom:1px solid var(--ui-black-transparent,rgba(128,128,128,.25))}
 .twpf-file-actions{display:flex;gap:.25rem}
