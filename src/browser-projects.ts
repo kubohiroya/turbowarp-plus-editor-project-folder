@@ -12,8 +12,8 @@ export interface BrowserProject {
     id: string;
     title: string;
     /**
-     * A folder inside the stored folder, `''` for the stored folder itself. Only for compatibility: the Editor opens the
-     * project at the root of the stored folder, so an entry with another path is not a project folder there.
+     * A folder inside the stored folder, `''` for the stored folder itself. Only for entries kept by an earlier version:
+     * the Editor opens the project at the root of the stored folder, and `moveProjectToRoot` moves such a project there.
      */
     projectPath: string;
     createdAt: number;
@@ -34,6 +34,12 @@ export interface BrowserProjects {
     root(id: string): Promise<FileSystemDirectoryHandle | null>;
     /** The folder `projectPath` inside the entry's stored folder. Opening uses `root` instead. */
     directory(id: string): Promise<FileSystemDirectoryHandle | null>;
+    /**
+     * Moves the project of an entry kept by an earlier version, in the folder `projectPath`, to the root of the stored
+     * folder, where the Editor opens it, and records that. Nothing moves when a name in that folder is already taken
+     * at the root. Resolves with whether the project is at the root.
+     */
+    moveProjectToRoot(id: string): Promise<boolean>;
     /** The entry that holds `handle`, or `null` when it is not in the browser's storage. */
     find(handle: FileSystemHandle): Promise<BrowserProject | null>;
     touch(id: string): Promise<void>;
@@ -88,6 +94,26 @@ async function writeText(directory: FileSystemDirectoryHandle, name: string, tex
         await writable.abort().catch(() => {});
         throw error;
     }
+}
+
+// The files that make a folder a project folder go last, so a copy cut short is no project folder.
+const manifestFiles = ['project.source.json', 'sb3-source.json'];
+
+async function copyEntry(entry: FileSystemHandle, target: FileSystemDirectoryHandle): Promise<void> {
+    if (entry.kind === 'file') {
+        const file = await (entry as FileSystemFileHandle).getFile();
+        const writable = await (await target.getFileHandle(entry.name, {create: true})).createWritable();
+        try {
+            await writable.write(file);
+            await writable.close();
+        } catch (error) {
+            await writable.abort().catch(() => {});
+            throw error;
+        }
+        return;
+    }
+    const directory = await target.getDirectoryHandle(entry.name, {create: true});
+    for await (const child of (entry as IterableDirectory).values()) await copyEntry(child, directory);
 }
 
 async function resolvePath(root: FileSystemDirectoryHandle, path: string) {
@@ -179,6 +205,33 @@ export function openBrowserProjects(view: Window): BrowserProjects | null {
                 throw error;
             }
         },
+        moveProjectToRoot: id => exclusive(id, async () => {
+            const project = await readInfo(id);
+            const top = project && await root(id);
+            if (!project || !top) return false;
+            if (!project.projectPath) return true;
+            const parts = project.projectPath.split('/');
+            let source: FileSystemDirectoryHandle;
+            try {
+                source = await resolvePath(top, project.projectPath);
+            } catch (error) {
+                if (missing(error)) return false;
+                throw error;
+            }
+            // `project/` itself is a name at the root, so a project holding a `project` entry stays where it is.
+            const taken = new Set<string>();
+            for await (const entry of (top as IterableDirectory).values()) taken.add(entry.name);
+            const entries: FileSystemHandle[] = [];
+            for await (const entry of (source as IterableDirectory).values()) entries.push(entry);
+            if (entries.some(entry => taken.has(entry.name))) return false;
+            entries.sort((a, b) => Number(manifestFiles.includes(a.name)) - Number(manifestFiles.includes(b.name)));
+            for (const entry of entries) await copyEntry(entry, top);
+            // The old folder goes only after the copy is complete.
+            const parent = await resolvePath(top, parts.slice(0, -1).join('/'));
+            await parent.removeEntry(parts[parts.length - 1], {recursive: true});
+            await writeInfo({...project, projectPath: ''});
+            return true;
+        }),
         async find(handle) {
             const path = await (await folders()).projects.resolve(handle).catch(() => null);
             return path?.length && idPattern.test(path[0]) ? readInfo(path[0]) : null;
