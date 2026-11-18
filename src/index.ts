@@ -22,6 +22,7 @@ export {zipDirectory} from './zip.js';
 const messages = {
     en: {
         open: 'Open Folder…', save: 'Save to Project Folder', openBrowser: 'Open Folder Saved in This Browser…',
+        deviceUnavailable: 'This browser cannot open folders on your device. Use Chrome or Edge, or open a folder saved in this browser.',
         replace: 'Replace the open project and discard its unsaved changes?',
         opened: 'Project folder opened.', saved: 'Project folder saved.', unchanged: 'No changes to save.',
         sourceRemoved: (ids: string[]) => `Removed source metadata for replaced extensions: ${ids.join(', ')}. Use sb3-toolchain to fetch the managed sources again if you need to keep their provenance.`,
@@ -43,6 +44,7 @@ const messages = {
     },
     ja: {
         open: 'フォルダを開く…', save: 'プロジェクトフォルダに保存', openBrowser: 'ブラウザーに保存したフォルダを開く…',
+        deviceUnavailable: 'このブラウザーでは端末のフォルダを開けません。Chrome か Edge を使うか、ブラウザーに保存したフォルダを開いてください。',
         replace: '未保存の変更を破棄して、別の作品を開きますか？',
         opened: 'プロジェクトフォルダを開きました。', saved: 'プロジェクトフォルダに保存しました。', unchanged: '保存する変更はありません。',
         sourceRemoved: (ids: string[]) => `差し替えた拡張機能（${ids.join('、')}）の出どころ情報を削除しました。出どころを保つには、sb3-toolchain で拡張機能を取得し直してください。`,
@@ -73,8 +75,10 @@ interface MenuProps {
     onRequestClose(): void;
 }
 type MenuEntry = {session: ReturnType<typeof createFolderSession>; open(locale: string): void; save(locale: string): void;
-    /** Opens a folder kept in this browser, when the host shows it beside the folder picker. */
-    openBrowser?(locale: string): void};
+    /** Opens a folder kept in this browser, wherever the browser's folders are available. */
+    openBrowser?(locale: string): void;
+    /** Whether the browser can pick folders on the device; without it, Open uses the browser's folders. */
+    deviceFolders: boolean};
 const menus = new WeakMap<FolderVM, MenuEntry>();
 
 type ObserverWindow = PickerWindow & {FileSystemObserver?: new (callback: () => void) => {
@@ -276,6 +280,7 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
         };
     }
     const menu: MenuEntry = {
+        deviceFolders: typeof devicePicker === 'function',
         session,
         open(locale) {
             const message = messageFor(locale);
@@ -283,7 +288,7 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
                 .then(result => {if (result === 'opened') report(message.opened);}, error => fail(locale, error)).finally(renderReload);
             renderReload();
         },
-        openBrowser: devicePicker && browserProjects ? locale => {
+        openBrowser: browserProjects ? locale => {
             const message = messageFor(locale);
             session.open(chooseBrowserFolder, () => view.confirm(message.replace))
                 .then(result => {if (result === 'opened') report(message.opened);}, error => fail(locale, error)).finally(renderReload);
@@ -379,6 +384,8 @@ export function projectFolderActions(vm: FolderVM, locale = 'en') {
     return {
         open: () => entry.open(locale),
         openBrowser: entry.openBrowser ? () => entry.openBrowser!(locale) : undefined,
+        /** Whether Open can pick a folder on the device. Safari and Firefox cannot, so hosts show Open as unavailable. */
+        deviceFolders: entry.deviceFolders,
         save: entry.session.canSave ? () => entry.save(locale) : undefined,
         detach: () => entry.session.detach()
     };
@@ -391,6 +398,12 @@ export function renderProjectFolderMenu(createElement: MenuElement, {
     if (!entry) return null;
     const labels = locale.startsWith('ja') ? messages.ja : messages.en;
     const item = (action: 'open' | 'openBrowser' | 'save') => {
+        // Without the device's folder picker, Open is shown but unavailable; the browser's folders have their own item.
+        if (action === 'open' && !entry.deviceFolders) {
+            return createElement(MenuItem, {command: `project-folder-${action}`},
+                createElement('span', {role: 'button', tabIndex: -1, 'aria-disabled': true, title: labels.deviceUnavailable,
+                    style: {opacity: 0.5, cursor: 'default'}}, labels[action]));
+        }
         const run = () => {onRequestClose(); entry[action]!(locale);};
         return createElement(MenuItem, {command: `project-folder-${action}`, onClick: run},
             createElement('span', {role: 'button', tabIndex: 0, onKeyDown(event: KeyboardEvent) {

@@ -23,8 +23,8 @@ TurboWarp Plus Editor で sb3-toolchain の作品フォルダ（展開ソース�
 Safari と Firefox にはフォルダ選択（`showDirectoryPicker`）がありません。これらのブラウザーでは、作品フォルダをブラウザーの中の保存領域（OPFS、Origin Private File System）に置きます。読み書きの処理はデバイス上のフォルダと同じです。 [Editor #660](https://github.com/kubohiroya/turbowarp-plus-editor/issues/660)
 
 - `mountProjectFolder` の `browserStorage` で使い方を選びます。
-  - `fallback`（既定）：フォルダ選択がないブラウザーでだけ使います。**フォルダを開く…** はブラウザー内の作品フォルダの一覧を開き、`createFromSnapshot` は新しい作品フォルダの名前を尋ねます（`title` で名前の初期値を渡せます）。
-  - `always`：フォルダ選択があるブラウザーでも使います。ファイルメニューに **ブラウザーに保存したフォルダを開く…** を足し、`projectFolderActions(vm).openBrowser` でも開けます。
+  - `fallback`（既定）：フォルダ選択がないブラウザー（Safari、Firefox）でだけ使います。ファイルメニューでは **フォルダを開く…** を、このブラウザーでは端末のフォルダを開けない旨を添えて無効にし、ブラウザー内の作品フォルダの一覧を開く **ブラウザーに保存したフォルダを開く…** を出します。`projectFolderActions(vm)` は `deviceFolders: false` を返すので、ホストのメニューでも同じように無効にできます。ホストが `open` を呼んだときは、これまでどおりブラウザー内のフォルダを開きます。`createFromSnapshot` は新しい作品フォルダの名前を尋ねます（`title` で名前の初期値を渡せます）。
+  - `always`：フォルダ選択があるブラウザーでも使います。ファイルメニューの **フォルダを開く…** の隣に **ブラウザーに保存したフォルダを開く…** を足し、`projectFolderActions(vm).openBrowser` でも開けます。
   - `off`：使いません。
 - 一覧のダイアログでは、作品フォルダを開く、ZIP で書き出す、削除することができます。保存領域の使用量と、ブラウザーが消さずに残すか（`persisted`）も表示します。閉じるボタンは X のアイコンで、名前は表示の言語に合わせます。
 - 作品フォルダは `turbowarp-plus/projects/<id>/` に置き、表示名と時刻は `turbowarp-plus/project-info/<id>.json` に置きます。作品フォルダの外に置くので、Git の管理対象には入りません。`projectPath` を指定すると、リポジトリのルートの下の作品フォルダ（例：`project`）を開けます。
