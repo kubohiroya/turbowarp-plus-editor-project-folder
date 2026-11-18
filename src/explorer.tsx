@@ -7,7 +7,7 @@ import {projectFolderOverwriteWarning} from './create-folder.js';
 import {followProjectFolder} from './folder-registry.js';
 import {hiddenEntry, readExplorerState, subscribeExplorerState, writeExplorerState} from './explorer-state.js';
 import type {ExplorerTreeState} from './explorer-state.js';
-import type {ExplorerMutation, FollowedFolder} from './folder-registry.js';
+import type {ExplorerMutation, FollowedFolder, ProjectFolderLocation} from './folder-registry.js';
 import type {Json, Project} from './source.js';
 import {canMoveExplorerEntry, copyExplorerDirectory, copyExplorerFile, createExplorerDirectory, deleteExplorerEntry, ExplorerFileError,
     explorerNameAvailable, moveExplorerEntry, parentPath, renameExplorerEntry, resolveExplorerDirectory} from './explorer-files.js';
@@ -58,7 +58,17 @@ const messages = {
         label: 'Project folder', loading: 'Loading…', empty: 'This folder is empty.', noMatches: 'No matching files.',
         results: 'Matching files',
         noFolder: 'Open a folder to show its files here.', open: 'Open Folder…',
-        create: 'Create Project Folder', creating: 'Creating project folder…',
+        creating: 'Creating project folder…',
+        storageIntro: 'Save the current project as a folder containing its project data, costumes, sounds and other files.',
+        deviceTitle: 'Save to a folder on this device',
+        deviceDescription: 'Choose a folder on your computer. You can view its files in Finder or File Explorer and work with them in VS Code or other apps.',
+        deviceNext: 'The button opens a folder picker. Choose an empty folder or create a new one there.',
+        deviceCreate: 'Choose a Folder and Save…',
+        browserTitle: 'Save in this browser',
+        browserDescription: 'Enter a name to create a project folder in this site’s storage, without choosing a folder on your computer. Its files are not directly visible in Finder, File Explorer or other apps.',
+        browserRetention: 'The project stays in this browser profile on this device. Clearing site data or automatic browser cleanup may delete it. Keep a copy by exporting an SB3 or ZIP, or saving it to GitHub.',
+        browserReopen: 'To continue later, use Open Folder Saved in This Browser… in the File menu.',
+        browserCreate: 'Name and Save in This Browser…',
         createFailed: 'Could not create the project folder.',
         unavailable: 'File tabs are unavailable in this editor layout.',
         failed: 'This folder could not be read.', denied: 'Permission to read this folder was not granted.',
@@ -78,7 +88,17 @@ const messages = {
         label: '作品フォルダ', loading: '読み込んでいます…', empty: 'このフォルダは空です。', noMatches: '該当するファイルはありません。',
         results: '検索結果',
         noFolder: 'フォルダを開くと、ここにファイルを表示します。', open: 'フォルダを開く…',
-        create: 'プロジェクトフォルダを作成', creating: 'プロジェクトフォルダを作成しています…',
+        creating: 'プロジェクトフォルダを作成しています…',
+        storageIntro: '編集中の作品を、作品データ・コスチューム・音などのファイルをまとめたプロジェクトフォルダとして保存します。',
+        deviceTitle: '端末のフォルダに保存',
+        deviceDescription: 'パソコン上のフォルダを選んで保存します。Finder やエクスプローラーでファイルを確認でき、VS Code などの外部アプリでも扱えます。',
+        deviceNext: 'ボタンを押すとフォルダ選択画面が開きます。空のフォルダを選ぶか、その画面で新しいフォルダを作成してください。',
+        deviceCreate: 'フォルダを選んで保存…',
+        browserTitle: 'このブラウザー内に保存',
+        browserDescription: '名前を入力すると、このサイト専用の保存領域にプロジェクトフォルダを作成します。パソコン上のフォルダを選ぶ必要はありません。Finder やエクスプローラー、外部アプリからファイルを直接見ることはできません。',
+        browserRetention: '保存した作品は、この端末のこのブラウザーのプロファイル内に残ります。サイトデータの削除やブラウザーの自動整理で消える場合があります。SB3・ZIP の書き出しや GitHub への保存で、別の場所にも作品を残してください。',
+        browserReopen: '次回は「ファイル」メニューの「ブラウザーに保存したフォルダを開く…」から開けます。',
+        browserCreate: '名前を付けてブラウザー内に保存…',
         createFailed: 'プロジェクトフォルダを作成できませんでした。',
         unavailable: 'このエディターのレイアウトではファイルをタブで開けません。',
         failed: 'このフォルダを読み込めません。', denied: 'このフォルダを読む許可がありません。',
@@ -191,9 +211,18 @@ background:repeating-conic-gradient(rgba(128,128,128,.22) 0 25%,transparent 0 50
 color:inherit;color:color-mix(in srgb,currentColor 78%,transparent);font-size:.75em;line-height:1.4;
 white-space:normal;overflow-wrap:anywhere}
 .${prefix}-status{opacity:.7;font-style:italic;padding-block:.15em}
-.${prefix}-empty{padding:.5em}
+.${prefix}-empty{padding:.75em;line-height:1.6;overflow-wrap:anywhere}
 .${prefix}-empty p{margin:0 0 .6em}
-.${prefix}-empty button{color:inherit;background:transparent;border:1px solid currentColor;border-radius:4px;padding:.2em .6em;font:inherit;cursor:pointer}`;
+.${prefix}-storage{padding-block:.8em;border-block-start:1px solid color-mix(in srgb,currentColor 25%,transparent)}
+.${prefix}-storage h3{margin:0 0 .5em;font-size:1em}
+.${prefix}-empty button{color:inherit;background:transparent;border:1px solid currentColor;border-radius:4px;padding:.4em .7em;font:inherit;cursor:pointer;white-space:normal;max-width:100%}
+.${prefix}-storage button{display:inline-flex;align-items:center;gap:.45em;text-align:start;
+border-radius:.65rem;padding:.55em .9em;background:var(--looks-secondary,#855cd6);
+border-color:var(--looks-secondary,#855cd6);color:#fff;font-weight:600;line-height:1.4}
+.${prefix}-storage button:hover:not(:disabled){background:color-mix(in srgb,var(--looks-secondary,#855cd6) 88%,#000)}
+.${prefix}-storage button:focus-visible{outline:2px solid var(--looks-secondary,#855cd6);outline-offset:3px}
+.${prefix}-storage button svg{flex:none}
+.${prefix}-empty button:disabled{opacity:.6;cursor:wait}`;
 
 const indent = (level: number) => ({paddingInlineStart: `${0.25 + level * 1.1}em`});
 
@@ -212,6 +241,11 @@ const icons: Record<IconKind, string[]> = {
     'code': ['M5.5 4.5L2 8l3.5 3.5', 'M10.5 4.5L14 8l-3.5 3.5', 'M9 3l-2 10'],
     'text': [page, corner, 'M5.5 7.5h5M5.5 9.5h5M5.5 11.5h3'],
     'file': [page, corner]
+};
+const storageIcons: Record<ProjectFolderLocation, string[]> = {
+    device: icons.folder,
+    browser: ['M2.5 2.5h11a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1z',
+        'M1.5 5.5h13', 'M3.5 4h.1M5.5 4h.1']
 };
 const extensionIcons: Record<string, IconKind> = {
     json: 'json', svg: 'image', png: 'image', jpg: 'image', jpeg: 'image', gif: 'image', bmp: 'image', webp: 'image',
@@ -844,8 +878,8 @@ export type FollowFileStatuses = (directory: FileSystemDirectoryHandle,
 type FolderViewProps = {
     vm: object;
     locale?: string;
-    /** Saves the current project to a local folder. */
-    createFolder?(): Promise<unknown>;
+    /** Saves the current project to the selected storage location. */
+    createFolder?(location?: ProjectFolderLocation): Promise<unknown>;
     marks?: FollowMarks;
     fileStatuses?: FollowFileStatuses;
     /** Reports unsaved text edits in open file tabs for the given folder. */
@@ -867,12 +901,12 @@ function FolderView({vm, locale = 'en', marks: followMarks, fileStatuses: follow
     const message = messagesFor(locale);
     const [creating, setCreating] = React.useState(false);
     const [createError, setCreateError] = React.useState('');
-    const create = async () => {
+    const create = async (location: ProjectFolderLocation) => {
         if (!createFolder || creating) return;
         setCreating(true);
         setCreateError('');
         try {
-            await createFolder();
+            await createFolder(location);
         } catch {
             setCreateError(message.createFailed);
         } finally {
@@ -938,8 +972,27 @@ function FolderView({vm, locale = 'en', marks: followMarks, fileStatuses: follow
         return <div className={`${prefix}-empty`}>
             <style>{css}</style>
             {createFolder ? <>
-                <p>{projectFolderOverwriteWarning(locale)}</p>
-                <button type="button" disabled={creating} onClick={() => void create()}>{message.create}</button>
+                <p>{message.storageIntro}</p>
+                {(folder.locations ?? ['device']).map(location => <section key={location}
+                    className={`${prefix}-storage`} data-project-folder-location={location}>
+                    <h3>{location === 'device' ? message.deviceTitle : message.browserTitle}</h3>
+                    {location === 'device' ? <>
+                        <p>{message.deviceDescription}</p>
+                        <p>{message.deviceNext}</p>
+                        <p>{projectFolderOverwriteWarning(locale)}</p>
+                    </> : <>
+                        <p>{message.browserDescription}</p>
+                        <p>{message.browserRetention}</p>
+                        <p>{message.browserReopen}</p>
+                    </>}
+                    <button type="button" disabled={creating} onClick={() => void create(location)}>
+                        <svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor"
+                            strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+                            {storageIcons[location].map((d, index) => <path key={index} d={d} />)}
+                        </svg>
+                        <span>{location === 'device' ? message.deviceCreate : message.browserCreate}</span>
+                    </button>
+                </section>)}
                 {creating && <p role="status">{message.creating}</p>}
                 {createError && <p role="alert">{createError}</p>}
             </> : <>

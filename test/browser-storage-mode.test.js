@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {mountProjectFolder, projectFolderActions, renderProjectFolderMenu} from '../dist/index.js';
+import {followProjectFolder, mountProjectFolder, projectFolderActions, renderProjectFolderMenu} from '../dist/index.js';
 
 const vm = () => ({
     runtime: {storage: {addHelper() {}}, getTargetForStage: () => ({}), on() {}, off() {}},
@@ -16,17 +16,22 @@ function mount(t, view, browserStorage) {
     const machine = vm();
     const folder = mountProjectFolder({vm: machine, document: document(view), host, browserStorage});
     if (folder) t.after(() => folder.dispose());
-    return {folder, actions: folder && projectFolderActions(machine)};
+    let locations;
+    const stop = followProjectFolder(machine, mounted => {locations = mounted?.locations;});
+    stop();
+    return {folder, locations, actions: folder && projectFolderActions(machine)};
 }
 
 test('with the folder picker, the browser folders stay hidden unless the host asks for them', t => {
     const fallback = mount(t, {showDirectoryPicker: picker, ...storage});
     assert.equal(fallback.folder.browserProjects, null);
     assert.equal(fallback.actions.openBrowser, undefined);
+    assert.deepEqual(fallback.locations, ['device']);
     const always = mount(t, {showDirectoryPicker: picker, ...storage}, 'always');
     assert.ok(always.folder.browserProjects);
     assert.equal(typeof always.actions.openBrowser, 'function');
     assert.equal(always.actions.deviceFolders, true);
+    assert.deepEqual(always.locations, ['device', 'browser']);
 });
 
 test('without the folder picker, the browser folders stand in for it, and nothing mounts when they are off or missing', t => {
@@ -35,6 +40,7 @@ test('without the folder picker, the browser folders stand in for it, and nothin
     // The browser's folders have their own command, and hosts show Open (device folders) as unavailable.
     assert.equal(typeof fallback.actions.openBrowser, 'function');
     assert.equal(fallback.actions.deviceFolders, false);
+    assert.deepEqual(fallback.locations, ['browser']);
     assert.equal(mount(t, storage, 'off').folder, null);
     assert.equal(mount(t, {navigator: {}}).folder, null);
 });
@@ -53,4 +59,13 @@ test('without the folder picker, the folder menu shows Open as unavailable and o
     assert.match(open.children[0].props.title, /Chrome か Edge/);
     assert.equal(openBrowser.props.command, 'project-folder-openBrowser');
     assert.equal(typeof openBrowser.props.onClick, 'function');
+});
+
+test('an explicitly unavailable destination fails before preparing or writing the project', async t => {
+    const browserOnly = mount(t, storage).folder;
+    const deviceOnly = mount(t, {showDirectoryPicker: picker}, 'always');
+    assert.deepEqual(deviceOnly.locations, ['device']);
+    const prepareFiles = () => assert.fail('An unavailable destination must not serialize the project');
+    await assert.rejects(browserOnly.createFromSnapshot({location: 'device', prepareFiles}), {code: 'unsupported'});
+    await assert.rejects(deviceOnly.folder.createFromSnapshot({location: 'browser', prepareFiles}), {code: 'unsupported'});
 });

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import {execFileSync} from 'node:child_process';
-import {mkdtemp, rm} from 'node:fs/promises';
+import {mkdir, mkdtemp, rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -15,12 +15,14 @@ const project = {targets: [target(true, 'Stage'), target(false, 'Cat')], monitor
 
 // WebKit keeps the private file system only in a persistent profile; Chromium has none of the picker once it is removed.
 const engines = [
+    ['Chromium with both storage choices', async profile => (await chromium.launch({headless: true})).newContext({acceptDownloads: true}),
+        false, 'always'],
     ['Chromium without the folder picker', async profile => (await chromium.launch()).newContext({acceptDownloads: true}),
         true],
     ['WebKit', profile => webkit.launchPersistentContext(profile, {acceptDownloads: true}), false]
 ];
 
-for (const [name, launch, withoutPicker] of engines) {
+for (const [name, launch, withoutPicker, browserStorage] of engines) {
     test(`${name}: create, save, reopen, export and delete a project folder kept in the browser`, async t => {
         const temp = await mkdtemp(path.join(tmpdir(), 'twpf-browser-projects-'));
         const server = await serveEditorRuntime({script: fileURLToPath(new URL('./browser-projects-page.js', import.meta.url))});
@@ -32,13 +34,42 @@ for (const [name, launch, withoutPicker] of engines) {
         page.on('pageerror', error => errors.push(error.message));
         t.after(() => assert.deepEqual(errors, []));
         await page.goto(server.url);
-        assert.equal(await page.evaluate(options => setup(options), {project, withoutPicker}), true);
+        assert.equal(await page.evaluate(options => setup(options), {project, withoutPicker, browserStorage}), true);
+
+        const panel = page.locator('[data-storage-choices]');
+        const device = panel.locator('[data-project-folder-location="device"]');
+        const browser = panel.locator('[data-project-folder-location="browser"]');
+        await expect(browser).toContainText('名前を入力すると');
+        await expect(browser).toContainText('サイトデータの削除');
+        await expect(browser).toContainText('直接見ることはできません');
+        await expect(browser).toContainText('SB3・ZIP');
+        if (browserStorage === 'always') {
+            await expect(device).toContainText('VS Code');
+            await expect(device).toContainText('空のフォルダ');
+            // Cancelling the device picker leaves both choices available.
+            await device.getByRole('button').click();
+            assert.equal(await page.evaluate(() => subject.created), 'cancelled');
+            assert.equal(await page.evaluate(() => pickerCalls), 1);
+            await expect(browser.getByRole('button')).toBeEnabled();
+        } else {
+            await expect(device).toHaveCount(0);
+        }
+        if (process.env.STORAGE_CHOICE_SCREENSHOT_DIR) {
+            await mkdir(process.env.STORAGE_CHOICE_SCREENSHOT_DIR, {recursive: true});
+            await panel.screenshot({path: path.join(process.env.STORAGE_CHOICE_SCREENSHOT_DIR,
+                browserStorage === 'always' ? 'chromium-storage-choices.png' : `browser-storage-${withoutPicker ? 'chromium' : 'webkit'}.png`)});
+        }
 
         // Saving a new project folder asks for a name instead of a folder on the device.
-        await page.evaluate(() => subject.create('ねこの冒険'));
+        await browser.getByRole('button').click();
         const createDialog = page.locator('dialog[data-browser-projects="create"]');
         await expect(createDialog.getByRole('heading')).toHaveText('新しい作品フォルダをブラウザー内に作る');
         await expect(createDialog.getByLabel('名前')).toHaveValue('ねこの冒険');
+        await createDialog.getByRole('button', {name: '閉じる'}).click();
+        assert.equal(await page.evaluate(() => subject.created), 'cancelled');
+        await expect(browser.getByRole('button')).toBeEnabled();
+        assert.deepEqual(await page.evaluate(() => subject.projects.list()), []);
+        await browser.getByRole('button').click();
         await createDialog.getByRole('button', {name: '作成'}).click();
         assert.equal(await page.evaluate(() => subject.created), 'opened');
         await expect(createDialog).toHaveCount(0);
@@ -46,6 +77,8 @@ for (const [name, launch, withoutPicker] of engines) {
         const [stored] = await page.evaluate(() => subject.projects.list());
         assert.equal(stored.title, 'ねこの冒険');
         assert.equal(stored.projectPath, '');
+        await expect(panel.locator('[data-project-folder-location]')).toHaveCount(0);
+        assert.equal(await page.evaluate(() => pickerCalls), browserStorage === 'always' ? 1 : 0);
 
         // Saving writes into the browser's folder and marks it as updated.
         const saved = await page.evaluate(async () => {
@@ -59,7 +92,7 @@ for (const [name, launch, withoutPicker] of engines) {
         assert.ok(updated.updatedAt >= stored.updatedAt);
 
         // The File menu's Open lists the browser's folders.
-        await page.evaluate(() => subject.actions().open());
+        await page.evaluate(() => {const actions = subject.actions(); (actions.openBrowser ?? actions.open)();});
         const openDialog = page.locator('dialog[data-browser-projects="open"]');
         const row = openDialog.locator(`[data-browser-project="${stored.id}"]`);
         await expect(row).toContainText('ねこの冒険');
@@ -67,7 +100,7 @@ for (const [name, launch, withoutPicker] of engines) {
         await expect(page.locator('[data-project-folder-status]')).toHaveText('プロジェクトフォルダを開きました。');
 
         // A ZIP keeps a copy outside the browser.
-        await page.evaluate(() => subject.actions().open());
+        await page.evaluate(() => {const actions = subject.actions(); (actions.openBrowser ?? actions.open)();});
         const download = page.waitForEvent('download');
         await row.getByRole('button', {name: 'ZIP で書き出す'}).click();
         const file = await download;
@@ -90,9 +123,28 @@ for (const [name, launch, withoutPicker] of engines) {
 
         // A repository kept in the browser opens its project/ folder, and the stored folder is the root.
         const repository = await page.evaluate(() => subject.createRepository('リポジトリ'));
-        await page.evaluate(() => subject.actions().open());
+        await page.evaluate(() => subject.actions().openBrowser());
         await openDialog.locator(`[data-browser-project="${repository}"]`).getByRole('button', {name: '開く'}).click();
         await expect.poll(() => page.evaluate(id => subject.openedFrom(id), repository))
             .toEqual({directory: true, root: true, name: 'project'});
     });
 }
+
+test('Chromium: the device choice saves to the selected handle and keeps browser storage separate', async t => {
+    const server = await serveEditorRuntime({script: fileURLToPath(new URL('./browser-projects-page.js', import.meta.url))});
+    const browser = await chromium.launch({headless: true});
+    t.after(async () => {await browser.close(); await server.close();});
+    const page = await browser.newPage();
+    await page.goto(server.url);
+    await page.evaluate(options => setup(options), {project, browserStorage: 'always', locale: 'en'});
+    const panel = page.locator('[data-storage-choices]');
+    await expect(panel).toContainText('Clearing site data');
+    await expect(panel.getByRole('button')).toHaveCount(2);
+    await page.evaluate(() => {globalThis.acceptDevicePicker = true;});
+    await panel.getByRole('button', {name: 'Choose a Folder and Save…'}).click();
+    assert.equal(await page.evaluate(() => subject.created), 'opened');
+    assert.equal(await page.evaluate(() => pickerCalls), 1);
+    assert.equal(await page.evaluate(() => subject.folder.directory.name), 'device-fixture');
+    assert.deepEqual(await page.evaluate(() => subject.projects.list()), []);
+    await expect(panel.locator('[data-project-folder-location]')).toHaveCount(0);
+});
