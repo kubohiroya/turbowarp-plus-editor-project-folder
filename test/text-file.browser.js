@@ -146,6 +146,61 @@ test('text fills the panel with floating actions and an interactive minimap', as
     if (process.env.TWPF_TEXT_SCREENSHOT) await page.screenshot({path: `${process.env.TWPF_TEXT_SCREENSHOT}.narrow.png`});
 });
 
+test('short files leave room above the scroll viewport for floating actions', async t => {
+    const page = await open(t);
+    const short = 'A first line long enough to extend underneath the floating actions. '.repeat(2);
+    await page.evaluate(content => mountFile({content, locale: 'ja', path: 'notes.txt'}), short);
+    const pane = page.locator('.twpf-file-edit');
+    const editor = pane.locator('.cm-content');
+    const clearOfToolbar = () => page.evaluate(() => {
+        const toolbar = document.querySelector('.twpf-file-toolbar').getBoundingClientRect();
+        const scroll = document.querySelector('.twpf-file-edit .cm-scroller').getBoundingClientRect();
+        const line = document.querySelector('.twpf-file-edit .cm-line').getBoundingClientRect();
+        return scroll.top >= toolbar.bottom && line.top >= toolbar.bottom;
+    });
+    await expect.poll(clearOfToolbar).toBe(true);
+    const toolbar = await page.locator('.twpf-file-toolbar').boundingBox();
+    const line = await pane.locator('.cm-line').first().boundingBox();
+    await page.mouse.click(toolbar.x + 20, line.y + line.height / 2);
+    await expect(editor).toBeFocused();
+    await page.keyboard.press('Home');
+    await page.keyboard.insertText('>');
+    await expect(editor).toHaveText('>' + short);
+    if (process.env.TWPF_TEXT_SCREENSHOT) await page.screenshot({path: `${process.env.TWPF_TEXT_SCREENSHOT}.short.png`});
+
+    await page.setViewportSize({width: 320, height: 600});
+    await expect.poll(clearOfToolbar).toBe(true);
+    await page.getByRole('radio', {name: '差分表示', exact: true}).click();
+    await expect(page.locator('.cm-mergeView')).toBeVisible();
+    const diffIsClear = () => page.evaluate(() =>
+        document.querySelector('.twpf-diff-content').getBoundingClientRect().top >=
+        document.querySelector('.twpf-file-toolbar').getBoundingClientRect().bottom);
+    await expect.poll(diffIsClear).toBe(true);
+    await page.getByRole('button', {name: '全体', exact: true}).click();
+    await expect.poll(diffIsClear).toBe(true);
+    await page.getByRole('radio', {name: '通常表示', exact: true}).click();
+    await expect.poll(clearOfToolbar).toBe(true);
+
+    await page.setViewportSize({width: 900, height: 600});
+    // Keep reserving space near the threshold even if it makes a small amount of scrolling necessary.
+    await page.evaluate(() => replaceContent('line\n'.repeat(25)));
+    await expect.poll(clearOfToolbar).toBe(true);
+    await page.setViewportSize({width: 900, height: 180});
+    await expect.poll(() => pane.locator('.cm-scroller').evaluate(node => node.getBoundingClientRect().top)).toBe(0);
+    await page.setViewportSize({width: 900, height: 600});
+    await expect.poll(clearOfToolbar).toBe(true);
+    await page.evaluate(() => replaceContent('line\n'.repeat(100)));
+    await expect.poll(() => pane.locator('.cm-scroller').evaluate(node => node.getBoundingClientRect().top)).toBe(0);
+    await page.evaluate(() => {
+        document.getElementById('root').style.display = 'none';
+        replaceContent('');
+    });
+    await page.evaluate(() => {document.getElementById('root').style.display = 'block';});
+    await expect.poll(clearOfToolbar).toBe(true);
+    await page.evaluate(() => fileSession.dispose());
+    await expect(pane).toHaveCount(0);
+});
+
 test('editing, saving and comparing retain the content and update the minimap', async t => {
     const page = await open(t, 'en');
     const edited = '{"edited": true}\n';
@@ -158,7 +213,8 @@ test('editing, saving and comparing retain the content and update the minimap', 
     await expect(page.getByRole('slider', {name: 'File minimap'})).toHaveAttribute('aria-valuemax', '2');
     await expect(page.getByRole('status').first()).toHaveText('Unsaved changes');
     await expect(page.locator('.twpf-file-status')).toHaveCSS('position', 'absolute');
-    assert.equal((await page.locator('.cm-editor').boundingBox()).height, 600);
+    await expect.poll(() => page.locator('.twpf-file-edit .cm-scroller').evaluate(node =>
+        node.getBoundingClientRect().top >= document.querySelector('.twpf-file-toolbar').getBoundingClientRect().bottom)).toBe(true);
     await page.clock.install();
     await page.getByRole('button', {name: 'Save file', exact: true}).click();
     await expect(page.locator('.twpf-file-snackbar')).toHaveText('Saved.');
