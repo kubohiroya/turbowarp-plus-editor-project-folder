@@ -69,6 +69,13 @@ async function open(t, locale = 'ja', {external, opfs = false, realCompanion} = 
     return page;
 }
 
+async function typeContent(page, text) {
+    const editor = page.locator('.twpf-file-edit .cm-content');
+    await editor.focus();
+    await editor.press('ControlOrMeta+a');
+    await page.keyboard.insertText(text);
+}
+
 test('text fills the panel with floating actions and an interactive minimap', async t => {
     const page = await open(t);
     await expect(page.locator('.twpf-file-path')).toHaveCount(0);
@@ -143,11 +150,11 @@ test('editing, saving and comparing retain the content and update the minimap', 
     const page = await open(t, 'en');
     const edited = '{"edited": true}\n';
     await expect(page.locator('.twpf-file-edit .cm-content')).toHaveAttribute('contenteditable', 'true');
-    await page.locator('.twpf-file-edit .cm-content').fill(edited);
+    await typeContent(page, edited);
     await expect(page.getByRole('button', {name: 'Save file', exact: true})).toBeEnabled();
-    await page.locator('.twpf-file-edit .cm-content').fill(content);
+    await typeContent(page, content);
     await expect(page.getByRole('button', {name: 'Save file', exact: true})).toBeDisabled();
-    await page.locator('.twpf-file-edit .cm-content').fill(edited);
+    await typeContent(page, edited);
     await expect(page.getByRole('slider', {name: 'File minimap'})).toHaveAttribute('aria-valuemax', '2');
     await expect(page.getByRole('status').first()).toHaveText('Unsaved changes');
     await expect(page.locator('.twpf-file-status')).toHaveCSS('position', 'absolute');
@@ -189,7 +196,7 @@ async function expectExternalLock(page) {
 test('external editing locks normal and diff views and imports into the unsaved tab', async t => {
     const external = {};
     const page = await open(t, 'ja', {external});
-    await page.locator('.twpf-file-edit .cm-content').fill('{"local": true}');
+    await typeContent(page, '{"local": true}');
     await page.getByRole('radio', {name: '差分表示', exact: true}).click();
     await page.getByRole('button', {name: 'VSCodeで編集', exact: true}).click();
     const dialog = page.getByRole('dialog', {name: 'VSCodeで編集中', exact: true});
@@ -265,7 +272,7 @@ test('OPFS files round-trip through the real companion with an injected launcher
 test('successful saves show a snackbar and conflicts keep a persistent error', async t => {
     const page = await open(t);
     await page.clock.install();
-    await page.locator('.twpf-file-edit .cm-content').fill('{"edited": true}');
+    await typeContent(page, '{"edited": true}');
     await page.getByRole('button', {name: 'ファイルを保存', exact: true}).click();
     const snackbar = page.locator('.twpf-file-snackbar');
     await expect(snackbar).toHaveText('保存しました');
@@ -274,12 +281,12 @@ test('successful saves show a snackbar and conflicts keep a persistent error', a
     if (process.env.TWPF_TEXT_SCREENSHOT) await page.screenshot({path: `${process.env.TWPF_TEXT_SCREENSHOT}.saved.png`});
     // A second save replaces the first notice and restarts its dismissal timer.
     await page.clock.fastForward(3000);
-    await page.locator('.twpf-file-edit .cm-content').fill('{"edited": false}');
+    await typeContent(page, '{"edited": false}');
     await page.getByRole('button', {name: 'ファイルを保存', exact: true}).click();
     await expect(page.locator('.twpf-file-status')).toBeHidden();
     await page.clock.fastForward(1000);
     await expect(snackbar).toBeVisible();
-    await page.locator('.twpf-file-edit .cm-content').fill('{"local": true}');
+    await typeContent(page, '{"local": true}');
     await page.evaluate(() => writeExternal('{"external": true}'));
     await page.getByRole('button', {name: 'ファイルを保存', exact: true}).click();
     await expect(page.locator('.twpf-file-status')).toContainText('このタブの外で変更されました');
