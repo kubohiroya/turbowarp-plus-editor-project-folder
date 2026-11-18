@@ -6,7 +6,7 @@ import type {ProjectFolderLocation} from './folder-registry.js';
 import {openBrowserProjects} from './browser-projects.js';
 import type {BrowserProjects} from './browser-projects.js';
 import {chooseBrowserProject} from './browser-project-dialog.js';
-import {notProjectFolderMessage, showNotProjectFolderDialog} from './not-project-dialog.js';
+import {folderNotEmptyMessage, notProjectFolderMessage, showFolderNotEmptyDialog, showNotProjectFolderDialog} from './not-project-dialog.js';
 import type {Chosen, FolderHost, FolderVM, OpenResult, PickerWindow} from './session.js';
 
 export type {Comparison, ComparisonRequest, ComparisonSection, FolderHost, FolderScreenState, FolderVM, OpenResult} from './session.js';
@@ -43,8 +43,7 @@ const messages = {
         dirty: 'You have unsaved edits.', running: 'Stop the project before reloading.',
         runningAuto: 'The changes load when the project stops.', busy: 'Please wait for the current operation.',
         waiting: 'Waiting for the external write to finish.',
-        full: 'These changes need the whole project to be reloaded.',
-        notEmpty: 'Choose an empty folder.'
+        full: 'These changes need the whole project to be reloaded.'
     },
     ja: {
         open: 'フォルダを開く…', save: 'プロジェクトフォルダに保存', openBrowser: 'ブラウザーに保存したフォルダを開く…',
@@ -66,8 +65,7 @@ const messages = {
         dirty: '未保存の編集があります。', running: '作品を停止してから再読み込みできます。',
         runningAuto: '作品の停止後に反映します。', busy: '処理が終わるまでお待ちください。',
         waiting: '外部の書き込みが終わるのを待っています。',
-        full: 'この変更は作品全体の再読み込みが必要です。',
-        notEmpty: '空のフォルダを選んでください。'
+        full: 'この変更は作品全体の再読み込みが必要です。'
     }
 };
 
@@ -443,7 +441,8 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
          * opened or attached, `directory` and `root` stay, and `followProjectFolder` listeners are not called (Save a
          * Copy). `browser` makes a new folder in the browser's storage named by `title`, removed again when nothing is
          * written; a folder on the device that is not empty is overwritten only when the user confirms it. Resolves
-         * with the folder written, or `null` when the user declined or `current()` turned false.
+         * with the folder written, or `null` when the user declined or `current()` turned false. The open project
+         * folder and its `root` are refused with `conflict` before anything is asked or written.
          */
         async copyToFolder({destination, prepareFiles, collectEdits, current = () => true, title}: {
             destination: ProjectFolderDestination;
@@ -452,6 +451,14 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
             current?: () => boolean;
             title?: string;
         }): Promise<FileSystemDirectoryHandle | null> {
+            // Writing over the open folder would replace the project under the session; Save is for that.
+            if (destination !== 'browser') {
+                for (const open of [session.directory, session.root]) {
+                    if (open && (open === destination || await open.isSameEntry(destination).catch(() => false))) {
+                        throw new FolderError('conflict', 'The copy cannot go to the open project folder');
+                    }
+                }
+            }
             const write = async (target: FileSystemDirectoryHandle, isNew: boolean) => {
                 try {
                     const overwrite = !isNew && !await isProjectFolderEmpty(target);
@@ -473,7 +480,8 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
         /**
          * Asks the user for an empty folder on the device, for a new project. Call it while handling the user's click,
          * as the browser lets the folder picker open only then. Resolves with `null` when the user cancelled, or chose
-         * a folder that is not empty, which the status line then tells (“Choose an empty folder.”). Rejects with
+         * a folder that is not empty, which a modal dialog then tells (“Choose an empty folder.”); it resolves once the
+         * dialog closes. Rejects with
          * `unsupported` where the browser cannot pick folders on the device.
          */
         async pickEmptyFolder({locale: language = locale, id = folderPickerId}: {locale?: string; id?: string} = {}) {
@@ -486,7 +494,8 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
                 throw error;
             }
             if (await isProjectFolderEmpty(picked)) return picked;
-            report(messageFor(language).notEmpty);
+            // Where no dialog can be shown, the status line tells it instead.
+            await showFolderNotEmptyDialog({document, locale: language}).catch(() => report(folderNotEmptyMessage(language)));
             return null;
         },
         /**

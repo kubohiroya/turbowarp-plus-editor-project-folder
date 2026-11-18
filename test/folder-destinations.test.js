@@ -57,11 +57,17 @@ function memoryDirectory(name) {
     };
 }
 
+const texts = node => [node.textContent, ...node.children.flatMap(texts)].filter(Boolean);
+const okButton = dialog => dialog.children.flatMap(function find(node) {
+    return node.tagName === 'BUTTON' ? [node] : node.children.flatMap(find);
+})[0];
+
 function fakeEditor({picker, browser = false, browserStorage} = {}) {
     const stage = {};
     const opfs = memoryDirectory('');
     const confirms = [];
     const elements = [];
+    const dialogs = [];
     let answer = true;
     let state = project;
     const vm = {
@@ -75,12 +81,24 @@ function fakeEditor({picker, browser = false, browserStorage} = {}) {
         ...(picker ? {showDirectoryPicker: picker} : {}),
         ...(browser ? {navigator: {storage: {getDirectory: async () => opfs}}} : {})
     };
+    // Just enough of the DOM for the status line and the modal dialog.
     const document = {
-        defaultView: view, body: {append() {}},
-        createElement() {
-            const element = {style: {}, dataset: {}, isConnected: true, hidden: true, textContent: '', setAttribute() {}, remove() {}};
-            elements.push(element);
-            return element;
+        defaultView: view, body: {append() {}}, activeElement: null,
+        createElement(tag) {
+            const node = {
+                tagName: tag.toUpperCase(), style: {}, dataset: {}, children: [], listeners: {}, isConnected: true, hidden: true,
+                textContent: '', open: false,
+                setAttribute() {},
+                append(...children) {node.children.push(...children);},
+                remove() {node.isConnected = false;},
+                addEventListener(type, listener) {(node.listeners[type] ??= []).push(listener);},
+                focus() {document.activeElement = node;},
+                showModal() {node.open = true; dialogs.push(node);},
+                close() {node.open = false; for (const listener of node.listeners.close ?? []) listener();},
+                click() {for (const listener of node.listeners.click ?? []) listener();}
+            };
+            elements.push(node);
+            return node;
         }
     };
     const host = {isProjectDirty: () => false, beforeLoad() {}, onOpened() {}, onSaved() {}};
@@ -90,7 +108,7 @@ function fakeEditor({picker, browser = false, browserStorage} = {}) {
         return (await root.getDirectoryHandle('projects', {create: true})).children;
     };
     return {
-        vm, folder, confirms, stored, list: () => folder.browserProjects.list(),
+        vm, folder, confirms, stored, dialogs, list: () => folder.browserProjects.list(),
         status: () => elements.find(element => element.dataset.projectFolderStatus === ''),
         answer(value) {answer = value;}
     };
@@ -209,17 +227,29 @@ test('pickEmptyFolder returns an empty folder, and tells the user when the folde
     results.push(new DOMException('The user closed the dialog', 'AbortError'));
     assert.equal(await editor.folder.pickEmptyFolder({id: 'new-project'}), null);
     assert.equal(picked[1].id, 'new-project');
-    assert.equal(editor.status().hidden, true, 'cancelling says nothing');
+    assert.deepEqual(editor.dialogs, [], 'cancelling says nothing');
 
+    // A folder that is not empty is refused in a modal dialog; the call resolves once the dialog closes.
     const used = memoryDirectory('used');
     await used.getFileHandle('notes.txt', {create: true});
-    results.push(used);
-    assert.equal(await editor.folder.pickEmptyFolder({locale: 'ja'}), null);
-    assert.equal(editor.status().hidden, false);
-    assert.equal(editor.status().textContent, '空のフォルダを選んでください。');
-    results.push(used);
-    assert.equal(await editor.folder.pickEmptyFolder({locale: 'en'}), null);
-    assert.equal(editor.status().textContent, 'Choose an empty folder.');
+    for (const [locale, title, message] of [['ja', 'このフォルダは使えません', '空のフォルダを選んでください。'],
+        ['en', 'Cannot Use This Folder', 'Choose an empty folder.']]) {
+        results.push(used);
+        let settled = false;
+        const picking = editor.folder.pickEmptyFolder({locale}).finally(() => {settled = true;});
+        while (editor.dialogs.length < (locale === 'ja' ? 1 : 2)) await new Promise(resolve => setImmediate(resolve));
+        const dialog = editor.dialogs.at(-1);
+        assert.equal(dialog.dataset.projectFolderError, 'not-empty');
+        assert.equal(dialog.open, true);
+        assert.ok(texts(dialog).includes(title));
+        assert.ok(texts(dialog).includes(message));
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(settled, false, 'the dialog is modal: the call waits for it');
+        okButton(dialog).click();
+        assert.equal(await picking, null);
+        assert.equal(dialog.isConnected, false);
+    }
+    assert.equal(editor.status().hidden, true, 'the status line stays quiet');
 
     results.push(new Error('denied'));
     await assert.rejects(editor.folder.pickEmptyFolder(), /denied/);
@@ -227,4 +257,37 @@ test('pickEmptyFolder returns an empty folder, and tells the user when the folde
     const browserOnly = fakeEditor({browser: true});
     t.after(() => browserOnly.folder.dispose());
     await assert.rejects(browserOnly.folder.pickEmptyFolder(), {code: 'unsupported'});
+});
+
+test('a copy is refused before any question or write when it would go to the open folder or its root', async t => {
+    const {folder, confirms} = fakeEditor({picker: () => assert.fail('Unexpected picker call')});
+    t.after(() => folder.dispose());
+    const opened = memoryDirectory('opened');
+    assert.equal(await folder.createFromSnapshot({destination: opened, prepareFiles}), 'opened');
+    const before = [...opened.children.keys()];
+    const unexpected = () => assert.fail('A refused copy must not prepare the project');
+    await assert.rejects(folder.copyToFolder({destination: opened, prepareFiles: unexpected}), {code: 'conflict'});
+    // Another handle to the same folder is the same entry.
+    const alias = memoryDirectory('alias');
+    opened.isSameEntry = async other => other === opened || other === alias;
+    await assert.rejects(folder.copyToFolder({destination: alias, prepareFiles: unexpected}), {code: 'conflict'});
+    assert.deepEqual(confirms, []);
+    assert.deepEqual([...opened.children.keys()], before);
+    assert.equal(folder.directory, opened);
+});
+
+test('a copy is refused when it would go to the root the host opened the project in', async t => {
+    const {folder} = fakeEditor({picker: () => assert.fail('Unexpected picker call')});
+    t.after(() => folder.dispose());
+    const root = memoryDirectory('repository');
+    const project = await root.getDirectoryHandle('project', {create: true});
+    for (const [name, data] of seed) {
+        const writable = await (await project.getFileHandle(name, {create: true})).createWritable();
+        await writable.write(data);
+        await writable.close();
+    }
+    assert.equal(await folder.openDirectory(project, () => true, root), 'opened');
+    assert.equal(folder.root, root);
+    await assert.rejects(folder.copyToFolder({destination: root, prepareFiles: () => assert.fail('Refused')}), {code: 'conflict'});
+    assert.equal(await folder.copyToFolder({destination: memoryDirectory('elsewhere'), prepareFiles}) !== null, true);
 });
