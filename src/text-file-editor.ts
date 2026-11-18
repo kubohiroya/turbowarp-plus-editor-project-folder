@@ -95,7 +95,6 @@ max-height:40%;overflow:auto;border-radius:.3rem;background:var(--ui-primary,#ff
 box-sizing:border-box;max-width:calc(100% - 2rem);margin:0;padding:.65rem 1rem;border-radius:.35rem;
 background:#323232;color:#fff;font-size:.9em;box-shadow:0 2px 8px rgba(0,0,0,.3);pointer-events:none}
 .twpf-file-edit,.twpf-file-diff{flex:1;min-height:0}
-.twpf-file-edit.twpf-file-short{padding-top:var(--twpf-toolbar-height,3.25rem)}
 .twpf-file-diff{padding-top:var(--twpf-toolbar-height,3.25rem)}
 .twpf-file-edit>.cm-editor{height:100%}
 .twpf-text-file .cm-scroller{overflow:auto}
@@ -329,10 +328,8 @@ export function mountTextFile(parent: HTMLElement, options: TextFileOptions) {
     parent.append(shell);
     const toolbarObserver = browser && new browser.ResizeObserver(() => {
         panel.style.setProperty('--twpf-toolbar-height', `calc(${toolbar.getBoundingClientRect().height}px + 1rem)`);
-        measureToolbarSpace();
     });
     toolbarObserver?.observe(toolbar);
-    toolbarObserver?.observe(editPane);
 
     const editing = new Compartment();
     const view = new EditorView({
@@ -342,26 +339,9 @@ export function mountTextFile(parent: HTMLElement, options: TextFileOptions) {
             highlightActiveLine(), textMinimap(message.minimap),
             EditorView.contentAttributes.of({'aria-label': options.path}),
             keymap.of([...defaultKeymap, ...historyKeymap]),
-            EditorView.updateListener.of(update => {
-                if (update.docChanged) updateSaveState(undefined, true);
-                if (update.docChanged || update.geometryChanged) measureToolbarSpace();
-            })
+            EditorView.updateListener.of(update => {if (update.docChanged) updateSaveState(undefined, true);})
         ]
     });
-    function measureToolbarSpace() {
-        if (disposed || comparison) return;
-        view.requestMeasure({
-            key: editPane,
-            read: view => {
-                // Include the reserved space when comparing, so adding it cannot flip the decision back.
-                const available = editPane.clientHeight;
-                return available ? view.contentHeight < available : null;
-            },
-            write: short => {
-                if (!disposed && !comparison && short !== null) editPane.classList.toggle('twpf-file-short', short);
-            }
-        });
-    }
     const dirty = () => !view.state.doc.eq(savedDoc);
     const serialize = () => bom + (newline === '\n' ? view.state.doc.toString() : view.state.doc.toString().replace(/\n/gu, newline));
 
@@ -544,7 +524,6 @@ export function mountTextFile(parent: HTMLElement, options: TextFileOptions) {
             ++readVersion;
             baselineLoading = false;
             destroyDiff();
-            measureToolbarSpace();
         }
     }
 
