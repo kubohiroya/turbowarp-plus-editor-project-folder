@@ -1,16 +1,29 @@
 // Runs in the minimal editor runtime. Project folders live in the browser's private file system, as in Safari and
 // Firefox, which have no folder picker.
 import {mountProjectFolder, openBrowserProjects, projectFolderActions} from '../dist/index.js';
+import {renderProjectFolderExplorer} from '../dist/explorer.js';
+import * as React from 'react';
+import * as ReactDOM from 'react-dom';
 
 const encode = value => new TextEncoder().encode(`${JSON.stringify(value, null, 2)}\n`);
 
-globalThis.setup = async ({project, withoutPicker}) => {
+globalThis.setup = async ({project, withoutPicker, browserStorage = 'fallback', locale = 'ja'}) => {
     // Chromium has the picker; take it away so the browser's folders stand in for it as they do in Safari.
     if (withoutPicker) Object.defineProperty(window, 'showDirectoryPicker', {value: undefined, configurable: true});
     const root = await navigator.storage.getDirectory();
     for await (const name of root.keys()) await root.removeEntry(name, {recursive: true});
-    const runtime = await EditorRuntime.start(document.getElementById('workspace'), {locale: 'ja'});
-    const folder = mountProjectFolder({vm: runtime.vm, document, locale: 'ja', host: {
+    globalThis.pickerCalls = 0;
+    if (!withoutPicker && typeof window.showDirectoryPicker === 'function') {
+        window.showDirectoryPicker = async () => {
+            globalThis.pickerCalls++;
+            if (!globalThis.acceptDevicePicker) throw new DOMException('Cancelled', 'AbortError');
+            return root.getDirectoryHandle('device-fixture', {create: true});
+        };
+    }
+    const workspace = document.getElementById('workspace');
+    workspace.style.insetInlineStart = '320px';
+    const runtime = await EditorRuntime.start(workspace, {locale});
+    const folder = mountProjectFolder({vm: runtime.vm, document, locale, browserStorage, host: {
         isProjectDirty: runtime.isProjectDirty,
         beforeLoad() {},
         onOpened: runtime.markSaved,
@@ -25,8 +38,8 @@ globalThis.setup = async ({project, withoutPicker}) => {
     const projects = openBrowserProjects(window);
     globalThis.subject = {
         runtime, folder, projects,
-        actions: () => projectFolderActions(runtime.vm, 'ja'),
-        create: title => {subject.created = folder.createFromSnapshot({prepareFiles: async () => files, title});},
+        actions: () => projectFolderActions(runtime.vm, locale),
+        create: (title, location) => subject.created = folder.createFromSnapshot({prepareFiles: async () => files, title, location}),
         // A repository kept in the browser, with the project in project/ as Project Starter makes it.
         async createRepository(title) {
             const created = await projects.create(title, {projectPath: 'project'});
@@ -50,5 +63,12 @@ globalThis.setup = async ({project, withoutPicker}) => {
             return JSON.parse(await (await (await directory.getFileHandle('project.source.json')).getFile()).text());
         }
     };
+    const panel = document.createElement('aside');
+    panel.dataset.storageChoices = '';
+    Object.assign(panel.style, {position: 'absolute', inset: '0 auto 0 0', width: '320px', overflow: 'auto',
+        zIndex: '100', background: 'white', color: '#333', font: '14px sans-serif'});
+    document.body.append(panel);
+    ReactDOM.render(renderProjectFolderExplorer(React.createElement, {vm: runtime.vm, locale,
+        createFolder: location => subject.create('ねこの冒険', location)}), panel);
     return Boolean(folder) && Boolean(folder.browserProjects);
 };

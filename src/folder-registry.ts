@@ -1,10 +1,13 @@
 /** The project folder mounted for a VM, as a view of the folder follows it. */
 export type ExplorerMutation = (guard: () => void) => Promise<void>;
+export type ProjectFolderLocation = 'device' | 'browser';
 
 export interface FollowedFolder {
     readonly directory: FileSystemDirectoryHandle | null;
     /** The folder the user chose for `directory`: itself, or the repository whose `project` folder it is. */
     readonly root?: FileSystemDirectoryHandle | null;
+    /** Storage choices available when creating a project folder. */
+    readonly locations?: readonly ProjectFolderLocation[];
     subscribe(listener: () => void): () => void;
     subscribeEdits(listener: () => void): () => void;
     unsavedPaths(): ReadonlySet<string> | null;

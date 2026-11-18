@@ -2,6 +2,7 @@ import {FolderError} from './source.js';
 import {createFolderSession} from './session.js';
 import {isProjectFolderEmpty} from './create-folder.js';
 import {registerFolder} from './folder-registry.js';
+import type {ProjectFolderLocation} from './folder-registry.js';
 import {openBrowserProjects} from './browser-projects.js';
 import type {BrowserProjects} from './browser-projects.js';
 import {chooseBrowserProject} from './browser-project-dialog.js';
@@ -10,7 +11,7 @@ import type {Chosen, FolderHost, FolderVM, PickerWindow} from './session.js';
 export type {Comparison, ComparisonRequest, ComparisonSection, FolderHost, FolderScreenState, FolderVM, OpenResult} from './session.js';
 export type {ReloadTarget} from './block-reload.js';
 export {followProjectFolder} from './folder-registry.js';
-export type {FollowedFolder} from './folder-registry.js';
+export type {FollowedFolder, ProjectFolderLocation} from './folder-registry.js';
 export type {DeserializeBlocks} from './script-reload.js';
 export {createProjectFolder, projectFolderOverwriteWarning} from './create-folder.js';
 export {openBrowserProjects} from './browser-projects.js';
@@ -123,8 +124,14 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
     const pickDirectory = devicePicker ?
         async (options: {id: string; mode: 'readwrite'}): Promise<Chosen> => ({directory: await devicePicker.call(view, options)}) :
         chooseBrowserFolder;
-    const pickNewDirectory = async (options: {id: string; mode: 'readwrite'}, title?: string) =>
-        devicePicker ? devicePicker.call(view, options) : (await chooseBrowser('create', title)).directory;
+    const locations: ProjectFolderLocation[] = [];
+    if (devicePicker) locations.push('device');
+    if (browserProjects) locations.push('browser');
+    const pickNewDirectory = async (options: {id: string; mode: 'readwrite'}, title?: string,
+        location: ProjectFolderLocation = devicePicker ? 'device' : 'browser') => {
+        if (!locations.includes(location)) throw new FolderError('unsupported');
+        return location === 'device' ? devicePicker!.call(view, options) : (await chooseBrowser('create', title)).directory;
+    };
     /** Runs `run` with the browser folder of `directory` locked against other tabs, and marks it as updated. */
     const withBrowserProject = async <T>(directory: FileSystemDirectoryHandle | null, run: () => Promise<T>) => {
         const project = directory && browserProjects ? await browserProjects.find(directory).catch(() => null) : null;
@@ -314,6 +321,7 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
     const unregister = registerFolder(vm, {
         get directory() {return session.directory;},
         get root() {return session.root;},
+        locations,
         subscribe: listener => session.subscribe(listener),
         subscribeEdits: listener => session.subscribeEdits(listener),
         unsavedPaths: () => session.unsavedPaths(),
@@ -333,19 +341,21 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
          * Creates a project folder from a snapshot. `title` names a folder made in the browser, where the user names a
          * new folder instead of picking one on the device.
          */
-        createFromSnapshot({prepareFiles, collectEdits, directory, current = () => true, title}: {
+        createFromSnapshot({prepareFiles, collectEdits, directory, current = () => true, title, location}: {
             prepareFiles: () => Promise<ReadonlyMap<string, Uint8Array>>;
             collectEdits?: () => Promise<void>;
             directory?: FileSystemDirectoryHandle;
             current?: () => boolean;
             title?: string;
+            /** Explicit destination; omitted uses the device picker when available. */
+            location?: ProjectFolderLocation;
         }) {
             const message = locale.startsWith('ja') ?
                 '指定されたフォルダは空ではありません。フォルダに保存されている内容が上書きされる場合があります。よろしいですか？' :
                 'The selected folder is not empty. Contents in the folder may be overwritten. Continue?';
             return session.createFromSnapshot(async () => {
                 try {
-                    const selected = directory ?? await pickNewDirectory({id: 'turbowarp-plus-project-folder', mode: 'readwrite'}, title);
+                    const selected = directory ?? await pickNewDirectory({id: 'turbowarp-plus-project-folder', mode: 'readwrite'}, title, location);
                     if (!current()) return null;
                     const overwrite = !await isProjectFolderEmpty(selected);
                     if (!current() || (overwrite && !view.confirm(message))) return null;

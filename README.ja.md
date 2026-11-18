@@ -26,12 +26,16 @@ Safari と Firefox にはフォルダ選択（`showDirectoryPicker`）があり�
   - `fallback`（既定）：フォルダ選択がないブラウザー（Safari、Firefox）でだけ使います。ファイルメニューでは **フォルダを開く…** を、このブラウザーでは端末のフォルダを開けない旨を添えて無効にし、ブラウザー内の作品フォルダの一覧を開く **ブラウザーに保存したフォルダを開く…** を出します。`projectFolderActions(vm)` は `deviceFolders: false` を返すので、ホストのメニューでも同じように無効にできます。ホストが `open` を呼んだときは、これまでどおりブラウザー内のフォルダを開きます。`createFromSnapshot` は新しい作品フォルダの名前を尋ねます（`title` で名前の初期値を渡せます）。
   - `always`：フォルダ選択があるブラウザーでも使います。ファイルメニューの **フォルダを開く…** の隣に **ブラウザーに保存したフォルダを開く…** を足し、`projectFolderActions(vm).openBrowser` でも開けます。
   - `off`：使いません。
+- 作品フォルダをまだ開いていないパネルには、利用できる保存方式の説明と作成ボタンを出します。`always` でフォルダ選択と OPFS の両方が使える場合は2方式、Safari・Firefox ではブラウザー内保存の説明を出します。説明には、ボタンを押した後の操作、外部アプリからの見え方、ブラウザー内の作品を残すための書き出し方法を含めます。
+- `renderProjectFolderExplorer` の `createFolder(location)` には、選んだ保存先（`device` または `browser`）が渡ります。ホストはこれを `createFromSnapshot({location, ...})` に渡します。`location` を省略した場合は従来どおりフォルダ選択を優先し、利用できない保存先を明示した場合は別の保存先に切り替えずエラーにします。
 - 一覧のダイアログでは、作品フォルダを開く、ZIP で書き出す、削除することができます。保存領域の使用量と、ブラウザーが消さずに残すか（`persisted`）も表示します。閉じるボタンは X のアイコンで、名前は表示の言語に合わせます。
 - 作品フォルダは `turbowarp-plus/projects/<id>/` に置き、表示名と時刻は `turbowarp-plus/project-info/<id>.json` に置きます。作品フォルダの外に置くので、Git の管理対象には入りません。`projectPath` を指定すると、リポジトリのルートの下の作品フォルダ（例：`project`）を開けます。
 - 同じ作品フォルダへの保存は、`navigator.locks` で作品ごとに排他します。WebKit は `createWritable({mode: 'exclusive'})` を重ねても拒否しないので、タブ間の排他はロックで行います。保存すると一覧の更新時刻が変わります。
 - `openBrowserProjects(window)` は一覧・作成・削除・保存領域の状態を扱う口です。`chooseBrowserProject` は一覧のダイアログを、`exportBrowserProject` と `zipDirectory` は ZIP の書き出しを、ホストが直接使うためのものです。ZIP は圧縮せず、名前を UTF-8 で書きます。
 
 ブラウザーの中の作品フォルダは、サイトのデータを消したときや、しばらくサイトを使わなかったときに、ブラウザーが消すことがあります（Safari では 7 日間）。最初の作品フォルダを作るときに `navigator.storage.persist()` を求めますが、保証にはなりません。ZIP で書き出すか、Git で GitHub に送って残すようにダイアログで案内します。
+
+保存先選択の導入は、このパッケージを先に公開し、Editor の依存をその版へ固定してからホストの結線を反映します。切り戻すときは Editor の結線と依存の固定を一緒に戻します。OPFS に作成済みの作品は削除せず、ブラウザー内の一覧から開く・ZIP で書き出す経路を維持します。
 
 ## ブロックパレットの設定
 
