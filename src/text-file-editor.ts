@@ -10,10 +10,12 @@ import {yaml} from '@codemirror/lang-yaml';
 import {HighlightStyle, StreamLanguage, syntaxHighlighting} from '@codemirror/language';
 import {shell} from '@codemirror/legacy-modes/mode/shell';
 import {MergeView} from '@codemirror/merge';
-import {EditorState} from '@codemirror/state';
+import {Compartment, EditorState} from '@codemirror/state';
 import {drawSelection, EditorView, highlightActiveLine, highlightSpecialChars, keymap, lineNumbers} from '@codemirror/view';
 import {tags} from '@lezer/highlight';
 import type {FileBaseline} from './file-preview.js';
+import {textMinimap} from './text-minimap.js';
+import {connectExternalFileEditor} from './external-file-editor.js';
 
 const decoder = new TextDecoder('utf-8', {fatal: true, ignoreBOM: true});
 const encoder = new TextEncoder();
@@ -54,18 +56,55 @@ const highlighting = syntaxHighlighting(HighlightStyle.define([
 ]));
 
 const styles = `
-.twpf-text-file{display:flex;flex-direction:column;height:100%;min-height:0;font:inherit}
-.twpf-file-toolbar,.twpf-diff-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:.4rem;padding:.5rem .7rem;
+.twpf-text-shell{position:relative;height:100%;min-height:0}
+.twpf-text-file{position:relative;display:flex;flex-direction:column;height:100%;min-height:0;font:inherit}
+.twpf-text-file[inert]{opacity:.45}
+.twpf-external-overlay{position:absolute;z-index:10;inset:0;display:flex;align-items:center;justify-content:center;
+background:rgba(128,128,128,.16);padding:1rem;box-sizing:border-box}
+.twpf-external-overlay[hidden]{display:none}
+.twpf-external-card{max-width:28rem;padding:1rem;border-radius:.5rem;background:var(--ui-primary,#fff);
+color:var(--text-primary,inherit);box-shadow:0 3px 15px rgba(0,0,0,.2);font:inherit}
+.twpf-external-card h3{margin:0 0 .7rem;font-size:1rem}
+.twpf-external-card p{margin:0 0 1rem;font-size:.9rem}
+.twpf-external-card div{display:flex;flex-wrap:wrap;gap:.5rem}
+.twpf-external-card button{font:inherit;color:inherit;border:1px solid var(--ui-black-transparent,#888);
+border-radius:.3rem;background:var(--ui-secondary,#eee);padding:.4rem .6rem;cursor:pointer}
+.twpf-external-card button:disabled{opacity:.55;cursor:default}
+.twpf-file-toolbar{position:absolute;z-index:5;top:.5rem;right:1.25rem;display:flex;flex-wrap:wrap;
+justify-content:flex-end;gap:.4rem;max-width:calc(100% - 2rem);padding:.3rem;border-radius:.5rem;
+background:var(--ui-primary,#fff);box-shadow:0 1px 6px rgba(0,0,0,.18);opacity:.94}
+.twpf-diff-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:.4rem;padding:.5rem .7rem;
 border-bottom:1px solid var(--ui-black-transparent,rgba(128,128,128,.25))}
-.twpf-file-path{font-size:.83em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-inline-end:auto;min-width:0}
 .twpf-file-actions{display:flex;gap:.25rem}
+.twpf-file-modes{display:inline-flex;overflow:hidden;border:1px solid var(--ui-black-transparent,rgba(128,128,128,.35));
+border-radius:999px;background:var(--ui-secondary,rgba(128,128,128,.1))}
+.twpf-text-file .twpf-file-modes>button{border:0;border-radius:0;background:transparent;white-space:nowrap}
+.twpf-text-file .twpf-file-modes>button+button{border-inline-start:1px solid var(--ui-black-transparent,rgba(128,128,128,.35))}
+.twpf-file-modes>button[aria-checked=true]{background:var(--motion-primary,#2468b7);color:#fff}
+.twpf-file-modes>button:focus-visible{outline:2px solid var(--motion-primary,#2468b7);outline-offset:-3px}
 .twpf-text-file button{font:inherit;font-size:.85em;color:inherit;background:transparent;border:1px solid
 var(--ui-black-transparent,rgba(128,128,128,.45));border-radius:.3rem;padding:.25rem .55rem;cursor:pointer}
 .twpf-text-file button[aria-pressed=true]{background:var(--motion-primary,#2468b7);border-color:transparent;color:#fff}
 .twpf-text-file button:disabled{opacity:.55;cursor:default}
+.twpf-text-file button:has(svg){display:inline-flex;align-items:center;justify-content:center;gap:.3rem}
+.twpf-text-file button svg{width:1rem;height:1rem;flex:none}
 .twpf-file-status,.twpf-diff-status{margin:0;padding:.35rem .7rem;font-size:.82em}
+.twpf-file-status{position:absolute;z-index:5;bottom:.5rem;left:.5rem;max-width:calc(100% - 10rem);
+max-height:40%;overflow:auto;border-radius:.3rem;background:var(--ui-primary,#fff);box-shadow:0 1px 6px rgba(0,0,0,.18)}
+.twpf-file-snackbar{position:absolute;z-index:6;bottom:1rem;left:50%;transform:translateX(-50%);
+box-sizing:border-box;max-width:calc(100% - 2rem);margin:0;padding:.65rem 1rem;border-radius:.35rem;
+background:#323232;color:#fff;font-size:.9em;box-shadow:0 2px 8px rgba(0,0,0,.3);pointer-events:none}
 .twpf-file-edit,.twpf-file-diff{flex:1;min-height:0}
+.twpf-file-diff{padding-top:var(--twpf-toolbar-height,3.25rem)}
 .twpf-file-edit>.cm-editor{height:100%}
+.twpf-text-file .cm-scroller{overflow:auto}
+.twpf-text-minimap{position:absolute;z-index:4;right:1.25rem;bottom:1.25rem;width: min(7rem,25%);
+height:min(10.5rem,35%);overflow:hidden;border:1px solid var(--ui-black-transparent,rgba(128,128,128,.4));
+border-radius:.3rem;background:var(--ui-primary,#fff);opacity:.85;cursor:pointer;touch-action:none}
+.twpf-text-minimap:focus-visible{outline:2px solid var(--motion-primary,#2468b7);outline-offset:2px}
+.twpf-text-minimap canvas{display:block;width:100%;height:100%;pointer-events:none}
+.twpf-text-minimap-viewport{position:absolute;left:0;right:0;box-sizing:border-box;min-height:2px;
+border:1px solid var(--motion-primary,#2468b7);background:rgba(76,151,255,.2);pointer-events:none}
 .twpf-file-diff{display:flex;flex-direction:column}
 .twpf-text-file [hidden]{display:none}
 .twpf-diff-headings{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));font-size:.83em;
@@ -86,8 +125,17 @@ border-bottom:1px solid var(--ui-black-transparent,rgba(128,128,128,.25))}
 
 const messages = {
     en: {
-        edit: 'Edit', diff: 'Diff', changes: 'Changes only', whole: 'Full file', refresh: 'Reload latest commit',
-        save: 'Save file', unsaved: 'Unsaved changes', saving: 'Saving…', saved: 'File saved.',
+        text: 'Normal view', textHint: 'Edit the file content in this tab', diff: 'Diff view', diffHint: 'Compare with the latest commit',
+        viewMode: 'View mode', external: 'Edit in VSCode', importExternal: 'Finish and import edits',
+        externalTitle: 'Editing in VSCode', cancelExternal: 'Finish without importing',
+        externalUnavailable: 'Open the Editor through the local companion to edit this file in VSCode.',
+        externalOpening: 'Opening VSCode…', externalHint: 'Save in VSCode, then choose “Finish and import edits”. This tab stays locked until you finish.',
+        externalReading: 'Reading external edits…', externalImported: 'External edits imported. Save the file to keep them.',
+        externalFailed: 'External editing failed. Your edits are still here. Check the local companion and try again.',
+        externalReplace: 'This tab has also changed. Replace its current content with the file saved in VSCode?',
+        externalChanged: 'This tab changed while reading. Import the external edits again to compare.',
+        changes: 'Changes only', whole: 'Full file', refresh: 'Reload latest commit',
+        save: 'Save file', unsaved: 'Unsaved changes', saving: 'Saving…', saved: 'Saved.',
         conflict: 'The file changed outside this tab. Your edits are still here. Reopen the file to load the current version.',
         saveFailed: 'The file could not be saved.', tooLarge: 'The text file exceeds the 4 MiB limit.',
         close: 'Discard the unsaved edits to this file?', loading: 'Reading the latest commit…',
@@ -95,11 +143,20 @@ const messages = {
         readFailed: 'The committed version could not be read.', unsupported: 'The committed version is not a UTF-8 text file.',
         missing: 'This file is not in the latest commit.', unborn: 'This branch has no commits yet.',
         same: 'No differences.', formatting: 'The line endings or UTF-8 BOM differ.',
-        before: 'Latest commit', after: 'Current content', collapsed: '$ unchanged lines'
+        before: 'Latest commit', after: 'Current content', collapsed: '$ unchanged lines', minimap: 'File minimap'
     },
     ja: {
-        edit: '編集', diff: '差分', changes: '変更箇所のみ', whole: '全体', refresh: '最新コミットを読み直す',
-        save: 'ファイルを保存', unsaved: '未保存の変更があります', saving: '保存中…', saved: 'ファイルを保存しました。',
+        text: '通常表示', textHint: 'この画面でファイルの内容を編集', diff: '差分表示', diffHint: '最新コミットと現在の内容を比較',
+        viewMode: '表示モード', external: 'VSCodeで編集', importExternal: '終了して取り込む',
+        externalTitle: 'VSCodeで編集中', cancelExternal: '取り込まずに終了',
+        externalUnavailable: 'VSCodeで編集するには、ローカル連携からEditorを開いてください。',
+        externalOpening: 'VSCodeを開いています…', externalHint: 'VSCodeで保存後、「終了して取り込む」を押してください。終了までこのタブの操作はできません。',
+        externalReading: '外部の編集内容を読み込んでいます…', externalImported: '外部編集を取り込みました。ファイルを保存してください。',
+        externalFailed: '外部編集を利用できませんでした。編集内容は保持しています。ローカル連携を確認して再試行してください。',
+        externalReplace: 'この画面にも変更があります。VSCodeで保存した内容で、この画面の内容を置き換えますか？',
+        externalChanged: '読み込み中にこの画面の内容が変わりました。もう一度取り込みを行ってください。',
+        changes: '変更箇所のみ', whole: '全体', refresh: '最新コミットを読み直す',
+        save: 'ファイルを保存', unsaved: '未保存の変更があります', saving: '保存中…', saved: '保存しました',
         conflict: 'ファイルがこのタブの外で変更されました。編集内容はタブに残っています。現在の内容を読むにはファイルを開き直してください。',
         saveFailed: 'ファイルを保存できませんでした。', tooLarge: 'テキストファイルの上限（4 MiB）を超えています。',
         close: 'このファイルの未保存の編集を破棄しますか？', loading: '最新コミットを読み込んでいます…',
@@ -107,7 +164,7 @@ const messages = {
         readFailed: 'コミット済みの内容を読み込めませんでした。', unsupported: 'コミット済みの内容は UTF-8 テキストとして表示できません。',
         missing: '最新コミットにこのファイルはありません。', unborn: 'このブランチにはまだコミットがありません。',
         same: '差分はありません。', formatting: '改行コードまたは UTF-8 BOM が異なります。',
-        before: '最新コミット', after: '現在の内容', collapsed: '変更のない $ 行'
+        before: '最新コミット', after: '現在の内容', collapsed: '変更のない $ 行', minimap: 'ファイルのミニマップ'
     }
 };
 
@@ -128,28 +185,59 @@ export function mountTextFile(parent: HTMLElement, options: TextFileOptions) {
     const {ownerDocument: document} = parent;
     const browser = document.defaultView;
     const message = options.locale.toLowerCase().startsWith('ja') ? messages.ja : messages.en;
-    const element = <Tag extends 'div' | 'span' | 'p'>(tag: Tag, className: string) => {
+    const element = <Tag extends 'div' | 'span' | 'p' | 'h3'>(tag: Tag, className: string) => {
         const node = document.createElement(tag);
         node.className = className;
         return node;
     };
-    const button = (label: string, action: () => void) => {
+    const button = (label: string, action: () => void, icon?: string) => {
         const node = document.createElement('button');
         node.type = 'button';
         node.textContent = label;
+        if (icon) {
+            const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+            svg.setAttribute('viewBox', '0 0 24 24');
+            svg.setAttribute('fill', 'none');
+            svg.setAttribute('stroke', 'currentColor');
+            svg.setAttribute('stroke-width', '1.8');
+            svg.setAttribute('stroke-linecap', 'round');
+            svg.setAttribute('stroke-linejoin', 'round');
+            svg.setAttribute('aria-hidden', 'true');
+            svg.setAttribute('focusable', 'false');
+            const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+            path.setAttribute('d', icon);
+            svg.append(path);
+            node.prepend(svg);
+        }
         node.addEventListener('click', action);
         return node;
     };
     const press = (node: HTMLButtonElement, active: boolean) => node.setAttribute('aria-pressed', String(active));
     const setStatus = (node: HTMLElement, text: string) => {node.textContent = text; node.hidden = !text;};
+    const shell = element('div', 'twpf-text-shell');
     const panel = element('div', 'twpf-text-file');
     const style = document.createElement('style');
     style.textContent = styles;
     const toolbar = element('div', 'twpf-file-toolbar');
-    const path = element('span', 'twpf-file-path');
-    path.textContent = path.title = options.path;
+    toolbar.setAttribute('role', 'group');
+    toolbar.setAttribute('aria-label', options.path);
     const status = element('p', 'twpf-file-status');
     status.setAttribute('role', 'status');
+    const snackbar = element('p', 'twpf-file-snackbar');
+    snackbar.setAttribute('role', 'status');
+    snackbar.setAttribute('aria-atomic', 'true');
+    snackbar.hidden = true;
+    let snackbarTimeout: number | undefined;
+    const hideSnackbar = () => {
+        browser?.clearTimeout(snackbarTimeout);
+        snackbarTimeout = undefined;
+        setStatus(snackbar, '');
+    };
+    const showSaved = () => {
+        hideSnackbar();
+        setStatus(snackbar, message.saved);
+        snackbarTimeout = browser?.setTimeout(hideSnackbar, 4000);
+    };
     const editPane = element('div', 'twpf-file-edit');
     const diffPane = element('div', 'twpf-file-diff');
     const diffToolbar = element('div', 'twpf-diff-toolbar');
@@ -175,31 +263,81 @@ export function mountTextFile(parent: HTMLElement, options: TextFileOptions) {
     let savedDoc = EditorState.create({doc: initial, extensions: mixed ? EditorState.lineSeparator.of('\n') : []}).doc;
     let merge: MergeView | undefined;
     let saving = false;
+    let externalBusy = false;
+    let externalLocked = false;
+    let externalEditor: Awaited<ReturnType<typeof connectExternalFileEditor>> = null;
+    let externalOriginal: string | undefined;
     let disposed = false;
     let comparison: boolean | undefined;
     let changesOnly = true;
     let readVersion = 0;
+    let baselineLoading = false;
     const collapseUnchanged = {margin: 0, minSize: 1};
-    const edit = button(message.edit, () => showDiff(false));
-    const diff = button(message.diff, () => showDiff(true));
-    const saveButton = button(message.save, () => void save());
+    const text = button(message.text, () => showDiff(false), 'M14 3H5v18h14V8l-5-5v5h5M8 12h8M8 16h8');
+    text.title = message.textHint;
+    const diff = button(message.diff, () => showDiff(true), 'M4 3h16v18H4zM12 3v18M6.5 8h3M14.5 8h3M16 6.5v3');
+    diff.title = message.diffHint;
+    const saveButton = button(message.save, () => void save(), 'M4 3h13l4 4v14H3V3h1M7 3v6h10V3M7 21v-8h10v8');
+    const externalButton = button(message.external, () => void openExternal(), 'M14 3h7v7M21 3l-11 11M11 5H3v16h16v-8');
+    externalButton.disabled = true;
+    externalButton.title = message.externalUnavailable;
+    const overlay = element('div', 'twpf-external-overlay');
+    overlay.hidden = true;
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-label', message.externalTitle);
+    const externalCard = element('div', 'twpf-external-card');
+    const externalTitle = element('h3', '');
+    externalTitle.textContent = message.externalTitle;
+    const externalStatus = element('p', '');
+    externalStatus.setAttribute('role', 'status');
+    const importButton = button(message.importExternal, () => void importExternal());
+    const cancelExternal = button(message.cancelExternal, () => {
+        if (externalBusy || disposed) return;
+        externalEditor?.end();
+        setExternalLocked(false);
+        updateSaveState();
+        externalButton.focus();
+    });
+    const externalActions = element('div', '');
+    externalActions.append(importButton, cancelExternal);
+    externalCard.append(externalTitle, externalStatus, externalActions);
+    overlay.append(externalCard);
     const changes = button(message.changes, () => changeVisibility(true));
     const whole = button(message.whole, () => changeVisibility(false));
     const refresh = button(message.refresh, () => void loadBaseline());
-    const modes = element('div', 'twpf-file-actions');
-    modes.append(edit, diff);
-    toolbar.append(path, modes, saveButton);
+    const modes = element('div', 'twpf-file-modes');
+    modes.setAttribute('role', 'radiogroup');
+    modes.setAttribute('aria-label', message.viewMode);
+    text.setAttribute('role', 'radio');
+    diff.setAttribute('role', 'radio');
+    modes.append(text, diff);
+    modes.addEventListener('keydown', event => {
+        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const active = event.key === 'Home' ? false : event.key === 'End' ? true : !comparison;
+        showDiff(active);
+        (active ? diff : text).focus();
+    });
+    toolbar.append(modes, saveButton, externalButton);
     const ranges = element('div', 'twpf-file-actions');
     ranges.append(changes, whole);
     diffToolbar.append(ranges, refresh);
-    panel.append(style, toolbar, status, editPane, diffPane);
-    parent.append(panel);
+    panel.append(style, toolbar, status, snackbar, editPane, diffPane);
+    shell.append(panel, overlay);
+    parent.append(shell);
+    const toolbarObserver = browser && new browser.ResizeObserver(() => {
+        panel.style.setProperty('--twpf-toolbar-height', `calc(${toolbar.getBoundingClientRect().height}px + 1rem)`);
+    });
+    toolbarObserver?.observe(toolbar);
 
+    const editing = new Compartment();
     const view = new EditorView({
         parent: editPane, doc: savedDoc,
         extensions: [
-            common, mixed ? EditorState.lineSeparator.of('\n') : [], history(), drawSelection(), highlightSpecialChars(),
-            highlightActiveLine(), EditorView.contentAttributes.of({'aria-label': options.path}),
+            common, editing.of([]), mixed ? EditorState.lineSeparator.of('\n') : [], history(), drawSelection(), highlightSpecialChars(),
+            highlightActiveLine(), textMinimap(message.minimap),
+            EditorView.contentAttributes.of({'aria-label': options.path}),
             keymap.of([...defaultKeymap, ...historyKeymap]),
             EditorView.updateListener.of(update => {if (update.docChanged) updateSaveState(undefined, true);})
         ]
@@ -210,11 +348,97 @@ export function mountTextFile(parent: HTMLElement, options: TextFileOptions) {
     let wasDirty = false;
     function updateSaveState(text = saving ? message.saving : dirty() ? message.unsaved : '', contentChanged = false) {
         const isDirty = dirty();
-        saveButton.disabled = saving || !isDirty;
+        saveButton.disabled = saving || externalBusy || externalLocked || !isDirty;
+        externalButton.disabled = saving || externalBusy || externalLocked || !externalEditor;
+        importButton.disabled = saving || externalBusy;
+        cancelExternal.disabled = externalBusy;
         setStatus(status, text);
         if (isDirty !== wasDirty || contentChanged && isDirty) {
             wasDirty = isDirty;
             options.onDirtyChange?.();
+        }
+    }
+
+    function setExternalLocked(active: boolean) {
+        externalLocked = active;
+        if (active) {
+            for (const button of panel.querySelectorAll('button')) {
+                button.disabled = true;
+            }
+        } else {
+            text.disabled = diff.disabled = false;
+            changes.disabled = whole.disabled = baselineLoading || !merge;
+            refresh.disabled = baselineLoading || !options.readBaseline;
+        }
+        panel.inert = active;
+        overlay.hidden = !active;
+        view.dispatch({effects: editing.reconfigure(active ? [EditorState.readOnly.of(true), EditorView.editable.of(false)] : [])});
+        updateSaveState(status.textContent || '');
+    }
+
+    async function openExternal() {
+        if (!externalEditor || saving || externalBusy || disposed) return;
+        externalBusy = true;
+        setExternalLocked(true);
+        externalStatus.textContent = message.externalOpening;
+        updateSaveState(message.externalOpening);
+        const initial = serialize();
+        const reopening = externalEditor.active;
+        try {
+            await externalEditor.open(initial);
+            if (disposed) return;
+            if (!reopening) externalOriginal = initial;
+            externalStatus.textContent = message.externalHint;
+            updateSaveState(message.externalHint);
+            importButton.focus();
+        } catch {
+            if (!disposed) {
+                setExternalLocked(false);
+                updateSaveState(message.externalFailed);
+            }
+        } finally {
+            externalBusy = false;
+            if (!disposed) {
+                updateSaveState(status.textContent || '');
+                if (externalLocked) importButton.focus();
+            }
+        }
+    }
+
+    async function importExternal() {
+        if (!externalEditor?.active || saving || externalBusy || disposed) return;
+        externalBusy = true;
+        externalStatus.textContent = message.externalReading;
+        updateSaveState(message.externalReading);
+        const beforeRead = serialize();
+        try {
+            const source = await externalEditor.read();
+            if (disposed) return;
+            if (serialize() !== beforeRead) {
+                externalStatus.textContent = message.externalChanged;
+                return updateSaveState(message.externalChanged);
+            }
+            if (beforeRead !== externalOriginal && source !== beforeRead && !browser?.confirm(message.externalReplace)) {
+                externalStatus.textContent = message.externalHint;
+                return updateSaveState();
+            }
+            const imported = EditorState.create({doc: source.replace(/^\uFEFF/u, ''),
+                extensions: mixed ? EditorState.lineSeparator.of('\n') : []}).doc;
+            view.dispatch({changes: {from: 0, to: view.state.doc.length, insert: imported}});
+            externalOriginal = serialize();
+            externalEditor.end();
+            setExternalLocked(false);
+            showDiff(false);
+            updateSaveState(message.externalImported);
+            view.focus();
+        } catch {
+            if (!disposed) {
+                externalStatus.textContent = message.externalFailed;
+                updateSaveState(message.externalFailed);
+            }
+        } finally {
+            externalBusy = false;
+            if (!disposed) updateSaveState(status.textContent || '');
         }
     }
 
@@ -229,14 +453,16 @@ export function mountTextFile(parent: HTMLElement, options: TextFileOptions) {
     }
 
     async function save() {
-        if (saving || disposed || !dirty()) return;
+        if (saving || externalBusy || externalLocked || disposed || !dirty()) return;
         const doc = view.state.doc;
         const content = serialize();
         const bytes = encoder.encode(content);
         if (bytes.byteLength > options.limit) return updateSaveState(message.tooLarge);
+        hideSnackbar();
         saving = true;
         updateSaveState();
         let result = message.saveFailed;
+        let didSave = false;
         let writable: FileSystemWritableFileStream | undefined;
         try {
             const handle = await options.readHandle();
@@ -257,13 +483,17 @@ export function mountTextFile(parent: HTMLElement, options: TextFileOptions) {
             writable = undefined;
             saved = content;
             savedDoc = doc;
-            result = dirty() ? message.unsaved : message.saved;
+            didSave = true;
+            result = dirty() ? message.unsaved : '';
         } catch (error) {
             if (['NotFoundError', 'TypeMismatchError'].includes((error as DOMException).name)) result = message.conflict;
         } finally {
             await writable?.abort().catch(() => {});
             saving = false;
-            if (!disposed) updateSaveState(result);
+            if (!disposed) {
+                updateSaveState(result);
+                if (didSave) showSaved();
+            }
         }
     }
 
@@ -285,17 +515,21 @@ export function mountTextFile(parent: HTMLElement, options: TextFileOptions) {
         comparison = active;
         editPane.hidden = active;
         diffPane.hidden = !active;
-        press(edit, !active);
-        press(diff, active);
+        text.setAttribute('aria-checked', String(!active));
+        diff.setAttribute('aria-checked', String(active));
+        text.tabIndex = active ? -1 : 0;
+        diff.tabIndex = active ? 0 : -1;
         if (active) void loadBaseline();
         else {
             ++readVersion;
+            baselineLoading = false;
             destroyDiff();
         }
     }
 
     async function loadBaseline() {
         const version = ++readVersion;
+        baselineLoading = true;
         destroyDiff();
         headings.hidden = true;
         changes.disabled = whole.disabled = true;
@@ -323,7 +557,7 @@ export function mountTextFile(parent: HTMLElement, options: TextFileOptions) {
                 diffConfig: {scanLimit: 500, timeout: 100}
             });
             headings.hidden = false;
-            changes.disabled = whole.disabled = false;
+            changes.disabled = whole.disabled = externalLocked;
             changeVisibility(changesOnly);
             const notice = !base.head ? message.unborn : !base.bytes ? message.missing :
                 merge.chunks.length ? '' : text === edited ? message.same : message.formatting;
@@ -331,12 +565,15 @@ export function mountTextFile(parent: HTMLElement, options: TextFileOptions) {
         } catch (error) {
             if (current()) setStatus(diffStatus, (error as {code?: string})?.code === 'large' ? message.tooLarge : message.readFailed);
         } finally {
-            if (current()) refresh.disabled = !options.readBaseline;
+            if (current()) {
+                baselineLoading = false;
+                refresh.disabled = externalLocked || !options.readBaseline;
+            }
         }
     }
 
     const beforeUnload = (event: BeforeUnloadEvent) => {
-        if (!dirty()) return;
+        if (!dirty() && !externalLocked) return;
         event.preventDefault();
         event.returnValue = '';
     };
@@ -351,19 +588,29 @@ export function mountTextFile(parent: HTMLElement, options: TextFileOptions) {
     browser?.addEventListener('beforeunload', beforeUnload);
     showDiff(false);
     updateSaveState();
+    if (browser) void connectExternalFileEditor(browser, options.path.split('/').pop()!, options.extension, options.limit)
+        .then(editor => {
+            if (disposed) {editor?.close(); return;}
+            externalEditor = editor;
+            if (editor) externalButton.title = message.external;
+            updateSaveState(status.textContent || '');
+        });
     return {
         save,
         isDirty: dirty,
         readUnsaved: () => !disposed && dirty() ? encoder.encode(serialize()) : undefined,
         requestClose() {
-            if (!saving && (!dirty() || browser?.confirm(message.close))) options.close();
+            if (!saving && !externalLocked && (!dirty() || browser?.confirm(message.close))) options.close();
         },
         dispose() {
             disposed = true;
+            hideSnackbar();
+            toolbarObserver?.disconnect();
+            externalEditor?.close();
             browser?.removeEventListener('beforeunload', beforeUnload);
             destroyDiff();
             view.destroy();
-            panel.remove();
+            shell.remove();
         }
     };
 }
