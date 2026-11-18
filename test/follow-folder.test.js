@@ -74,6 +74,13 @@ test('tells the folder the user chose as root, next to the directory, and null w
     assert.equal(await folder.openDirectory(directory, () => true, repository), 'opened');
     assert.deepEqual(seen.at(-1), ['Selected project', 'Repository']);
     assert.equal(folder.root, repository);
+    // A folder that is not a project folder opens nothing and tells nothing.
+    const count = seen.length;
+    const notes = {name: 'Notes', async getFileHandle() {throw new DOMException('missing', 'NotFoundError');}};
+    assert.equal(await folder.openDirectory(notes, () => true, undefined, {notProjectDialog: false}), 'not-project');
+    assert.equal(seen.length, count);
+    assert.equal(folder.directory, directory);
+    assert.equal(folder.root, repository);
     loadOther();
     assert.deepEqual(seen.at(-1), [null, null]);
     assert.equal(folder.root, null);

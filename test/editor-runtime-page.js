@@ -36,6 +36,13 @@ globalThis.openFolder = async project => {
     globalThis.folder = {runtime, write, loads: () => loads,
         workspaceBlocks: () => runtime.workspace.getAllBlocks().map(block => block.type).sort(),
         vmBlocks: () => Object.values(runtime.vm.editingTarget.blocks._blocks).map(block => block.opcode).sort(),
-        notice: () => document.querySelector('[data-project-folder-external]')};
+        notice: () => document.querySelector('[data-project-folder-external]'),
+        // A folder without the project files at its root.
+        async openNotProject() {
+            const notes = await root.getDirectoryHandle('Notes', {create: true});
+            await (await notes.getFileHandle('notes.txt', {create: true})).createWritable().then(writable => writable.close());
+            return folder.openDirectory(notes, () => true);
+        },
+        directoryName: () => folder.directory?.name ?? null};
     return folder.openDirectory(directory, () => true);
 };

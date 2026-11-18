@@ -1,6 +1,6 @@
 import {assetKey, assetTypeFor, assertFolderUnchanged, collapsePalette, encodePalette, expandPalette, extensionsFile, fileVersion,
-    equal, FolderError, manifestFile, paletteFile, parseProject, planExtensionSave, projectAssets, projectChanges, projectFile, readProjectFolder,
-    readFolderUpdate, sameBytes, unsupported} from './source.js';
+    equal, FolderError, manifestFile, paletteFile, parseProject, planExtensionSave, projectAssets, projectChanges, projectFile, isProjectFolder,
+    readFolder, readFolderUpdate, sameBytes, unsupported} from './source.js';
 import type {Asset, AssetKind, FolderSource, FolderUpdate, JsonObject, Project, Storage} from './source.js';
 import {applyBlockReload, planBlockReload} from './block-reload.js';
 import type {ReloadTarget} from './block-reload.js';
@@ -141,7 +141,12 @@ type Session = {source: FolderSource; root: FileSystemDirectoryHandle; baseline:
 export type ReloadState = 'ready' | 'full' | 'waiting' | 'dirty' | 'running' | 'busy' | null;
 /** What the reload command does for the pending change, regardless of whether it may run now. */
 export type ReloadKind = 'partial' | 'full' | null;
-export type OpenResult = 'opened' | 'cancelled';
+/**
+ * `opened`: the folder's project is loaded. `cancelled`: nothing was opened, as when the user closed the picker or kept
+ * unsaved edits. `not-project`: the folder's root lacks `project.source.json`, `sb3-source.json` or
+ * `embedded-extensions.json`, so it is not a project folder and nothing was opened either.
+ */
+export type OpenResult = 'opened' | 'cancelled' | 'not-project';
 type SaveResult = {status: 'saved' | 'unchanged'; sourceRemoved: string[]};
 type SaveDirectory = {directory: FileSystemDirectoryHandle; files: Map<string, Uint8Array>; prefix: string};
 
@@ -275,11 +280,13 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
         vm.off('PROJECT_CHANGED', changed);
         unregisterTree?.();
     };
+    // A folder without the project files at its root is no project folder; one with them that cannot be read is broken.
+    const readProject = async (directory: FileSystemDirectoryHandle) =>
+        await isProjectFolder(directory) ? readFolder(directory, vm.runtime.storage) : 'not-project' as const;
     const openFrom = async (
         getDirectory: () => Promise<Chosen | null>,
         confirmReplace: () => boolean,
-        prepare: (directory: FileSystemDirectoryHandle) => Promise<FolderSource | null> =
-            directory => readProjectFolder(directory, vm.runtime.storage),
+        prepare: (directory: FileSystemDirectoryHandle) => Promise<FolderSource | 'not-project' | null> = readProject,
         stillCurrent = () => true
     ): Promise<OpenResult> => {
         if (disposed || busy) return 'cancelled';
@@ -290,6 +297,8 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
             if (!chosen || disposed) return 'cancelled';
             const storage = vm.runtime.storage;
             const source = await prepare(chosen.directory);
+            // The open project stays as it is, and the user is not asked about unsaved edits.
+            if (source === 'not-project') return disposed ? 'cancelled' : 'not-project';
             if (!source || disposed || !stillCurrent() || vm.runtime.getTargetForStage() !== priorStage) return 'cancelled';
             if (host.isProjectDirty() && !confirmReplace()) return 'cancelled';
             host.beforeLoad();
@@ -298,7 +307,6 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
             const assets = source.storageAssets;
             reader.assets = assets;
             let stage: object | null;
-            // The project may be the `project` folder inside the chosen one.
             const directory = source.directory;
             pendingTree = undefined;
             expectingTree = true;
@@ -436,7 +444,7 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
             return typeof pending === 'object' && pending !== null ? pending.update.version : null;
         },
         get directory() {return current?.source.directory ?? null;},
-        /** The folder the user chose: `directory` itself, or the repository whose `project` folder it is. */
+        /** The folder the user chose: `directory` itself, unless a host gave another one to `openDirectory`. */
         get root() {return current?.root ?? null;},
         async mutate(directory: FileSystemDirectoryHandle, operation: (guard: () => void) => Promise<void>) {
             const session = current;
@@ -534,10 +542,14 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
             if (!session || !session.pending || session.pending === 'waiting' || host.blockReload?.isRunning()) {
                 return Promise.resolve('cancelled');
             }
+            // The open folder is a project folder already; when it no longer is one, the error tells what is missing.
             return openFrom(() => Promise.resolve(current === session ? {directory: session.source.directory, root: session.root} : null),
-                confirmReplace);
+                confirmReplace, directory => readFolder(directory, vm.runtime.storage));
         },
-        /** `pick` gives the folder to open and, when it differs, the folder the user chose as `root`. */
+        /**
+         * `pick` gives the folder to open and, when a host located the project in another folder the user chose, that
+         * folder as `root`. Resolves with `not-project` when the folder is not a project folder.
+         */
         open(pick: (options: {id: string; mode: 'readwrite'}) => Promise<Chosen>, confirmReplace: () => boolean): Promise<OpenResult> {
             return openFrom(async () => {
                 try {
@@ -549,8 +561,9 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
             }, confirmReplace);
         },
         /**
-         * Opens `directory`, or its `project` folder when it has no project of its own. `root` is the folder the user
-         * chose, for a host that located the project itself; it defaults to `directory`.
+         * Opens the project at the root of `directory`, or resolves with `not-project` and changes nothing when the
+         * folder is not a project folder. `root` is the folder the user chose, for a host that located the project in
+         * it; it defaults to `directory`.
          */
         openDirectory(directory: FileSystemDirectoryHandle, confirmReplace: () => boolean,
             root?: FileSystemDirectoryHandle): Promise<OpenResult> {

@@ -4,14 +4,17 @@
  * browser may delete them; a user keeps a copy by exporting a ZIP or pushing to GitHub.
  *
  * Layout under the OPFS root:
- *   turbowarp-plus/projects/<id>/        the folder (a project folder, or a repository with the project inside)
+ *   turbowarp-plus/projects/<id>/        the folder, a project folder with the project at its root
  *   turbowarp-plus/project-info/<id>.json  its title and times, kept outside the folder so Git never sees them
  */
 
 export interface BrowserProject {
     id: string;
     title: string;
-    /** The project folder inside the stored folder, such as `project` in a repository, or `''` for the folder itself. */
+    /**
+     * A folder inside the stored folder, `''` for the stored folder itself. Only for compatibility: the Editor opens the
+     * project at the root of the stored folder, so an entry with another path is not a project folder there.
+     */
     projectPath: string;
     createdAt: number;
     updatedAt: number;
@@ -29,7 +32,7 @@ export interface BrowserProjects {
         directory: FileSystemDirectoryHandle}>;
     /** The stored folder, or `null` when it was deleted. */
     root(id: string): Promise<FileSystemDirectoryHandle | null>;
-    /** The project folder of the entry, `projectPath` inside its stored folder. */
+    /** The folder `projectPath` inside the entry's stored folder. Opening uses `root` instead. */
     directory(id: string): Promise<FileSystemDirectoryHandle | null>;
     /** The entry that holds `handle`, or `null` when it is not in the browser's storage. */
     find(handle: FileSystemHandle): Promise<BrowserProject | null>;

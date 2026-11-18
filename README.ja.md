@@ -8,10 +8,10 @@ TurboWarp Plus Editor で sb3-toolchain の作品フォルダ（展開ソース�
 
 - `mountProjectFolder({vm, document, host})` でワークスペースに接続します。ワークスペースの切り替え時には `dispose()` を呼びます。
 - `renderProjectFolderMenu(createElement, props)` は既存の開く・保存コマンドをホストのファイルメニューに渡します。
-- 選んだフォルダの直下に作品がなく、その中の `project` フォルダが作品フォルダのときは、`project` を作品フォルダとして開きます（Project Starter が作るリポジトリの形）。`project` フォルダの中に `.git` があるときは開きません。どちらも作品でないときは、選んだフォルダのエラーをそのまま出します。
-- 接続後の `openDirectory(handle, confirmReplace, root?)` には、ホストが選択済みのディレクトリハンドルを渡せます。ファイルメニューと同じ作品検証・`project` フォルダへの切り替え・未保存編集の確認を経て開き、保存先にはその作品フォルダを使います。`root` には、ホストが自分で作品の場所を見つけたときに、ユーザーが選んだフォルダを渡します。省略すると `handle` です。
+- 一つのフォルダには一つの作品を、フォルダのルートに置きます。ルートに `project.source.json`・`sb3-source.json`・`embedded-extensions.json` があるフォルダがプロジェクトフォルダです。ユーザーが開こうとしたフォルダ（**フォルダを開く…**、**ブラウザーに保存したフォルダを開く…**、ホストの `openDirectory`）がプロジェクトフォルダでないときは、エラーのダイアログに「このフォルダはプロジェクトフォルダではありません。」（英語では “This folder is not a project folder.”）と、その操作の言語で出し、何も開きません。開いている作品はそのまま残り、未保存の編集の確認も出さず、`followProjectFolder` の listener も呼びません。ダイアログはモーダルの `<dialog>`（`role="alertdialog"`、`data-project-folder-error="not-project"`）で、タイトルと **OK** ボタンがあり、OK で閉じるとフォーカスを元の場所に戻します。ファイルが壊れている、または対応していない形式のプロジェクトフォルダは、これまでどおり状態表示にエラーを出します。`createFromSnapshot` で新しいプロジェクトフォルダに保存する操作は変わりません。
+- 接続後の `openDirectory(handle, confirmReplace, root?, options?)` には、ホストが選択済みのディレクトリハンドルを渡せます。ファイルメニューと同じ作品検証・未保存編集の確認を経て開き、`'opened'`・`'cancelled'`・`'not-project'`（`OpenResult`）のどれかで終わります。`'not-project'` のときは何も変わっていません。エラーのダイアログを出しますが、ホストが自分の方法で知らせるときは `options.notProjectDialog` に `false` を渡すと出しません。`options.locale` はダイアログの言語で、省略すると `mountProjectFolder` の `locale` です。保存先にはその作品フォルダを使います。`root` には、ホストが作品を見つけたフォルダとして、ユーザーが選んだフォルダを渡します。省略すると `handle` です（`options` だけを渡すときは `undefined` を渡します）。ダイアログを出さなかったホスト向けに、ダイアログを出す `showNotProjectFolderDialog({document, locale})` と、その文言を返す `notProjectFolderMessage(locale)` もあります。
 - 接続後の `directory` は、読み込んだ作品のフォルダーのハンドルです。別の作品を読み込むか、フォルダーとの接続を外すと `null` になります。ホストは作品を見分けるのに使えます。
-- 接続後の `root` は、その作品のためにユーザーが選んだフォルダーです。`directory` そのもの、`directory` を `project` フォルダに持つリポジトリ、またはブラウザーに保存したフォルダでは保存したフォルダー全体を指します。`directory` が `null` のときは `null` です。ブラウザーではフォルダーの親を読めないので、ホストは Git のリポジトリを `root` に結び付けます。
+- 接続後の `root` は、その作品のためにユーザーが選んだフォルダーです。ホストが `openDirectory` に別のフォルダを渡したとき以外は `directory` そのものです。`directory` が `null` のときは `null` です。ブラウザーではフォルダーの親を読めないので、ホストは Git のリポジトリを `root` に結び付けます。
 - `host.screenState` を渡すと、Editor の画面状態をフォルダーに保存します。渡すものは workbench の `installProjectScreenState` が返すものです。作品フォルダーは SB3 ではないので、状態は `.tw-plus/workspace.json` に入れます。フォルダーを開くと、作品を読み込む前にこれを読み、`prepareLoad(text)` で渡します。保存時は、作品が変わっていなくても `serialize()` の結果を書きます。保存時刻だけが違うときは書きません。読み書きに失敗しても、開く操作と保存は失敗にしません。セッションは `projectFolder` スライス（ツリーで開いたフォルダーと選択中の項目）も登録します。SB3 から作品フォルダを作るとき、sb3-toolchain（0.26.0 以降）が展開したスナップショットに `.tw-plus/workspace.json` があれば、そのままフォルダーに書くので、作ったフォルダーは同じ画面で開きます。スナップショットにないときは、上書きするフォルダーの古い `workspace.json` を消します。`.tw-plus` のほかのファイルは残します。
 
 ホストは VM、メニューコンポーネント、作品状態を扱うコールバックを渡します。メニューからフォルダを開くには、ブラウザーが File System Access のフォルダ選択に対応しているか、[ブラウザー内の作品フォルダ](#ブラウザー内の作品フォルダ)を使える必要があります。ブロック、変数・リスト、スプライトの位置や大きさなどの項目、モニター、組み込みの拡張機能の編集を作品データ（`project.source.json`）に保存し、作品の実行で変わった状態も含みます。スプライトの追加・削除・名前の変更と、コスチューム・音の追加・削除も保存します。新しいアセットのファイルを先に書き、`sb3-source.json` と作品データを書いてから、参照されなくなったアセットのファイルを消します。 [Editor #305](https://github.com/kubohiroya/turbowarp-plus-editor/issues/305) · [Editor #308](https://github.com/kubohiroya/turbowarp-plus-editor/issues/308)
@@ -29,13 +29,22 @@ Safari と Firefox にはフォルダ選択（`showDirectoryPicker`）があり�
 - 作品フォルダをまだ開いていないパネルには、利用できる保存方式の説明と作成ボタンを出します。`always` でフォルダ選択と OPFS の両方が使える場合は2方式、Safari・Firefox ではブラウザー内保存の説明を出します。説明には、ボタンを押した後の操作、外部アプリからの見え方、ブラウザー内の作品を残すための書き出し方法を含めます。
 - `renderProjectFolderExplorer` の `createFolder(location)` には、選んだ保存先（`device` または `browser`）が渡ります。ホストはこれを `createFromSnapshot({location, ...})` に渡します。`location` を省略した場合は従来どおりフォルダ選択を優先し、利用できない保存先を明示した場合は別の保存先に切り替えずエラーにします。
 - 一覧のダイアログでは、作品フォルダを開く、ZIP で書き出す、削除することができます。保存領域の使用量と、ブラウザーが消さずに残すか（`persisted`）も表示します。閉じるボタンは X のアイコンで、名前は表示の言語に合わせます。
-- 作品フォルダは `turbowarp-plus/projects/<id>/` に置き、表示名と時刻は `turbowarp-plus/project-info/<id>.json` に置きます。作品フォルダの外に置くので、Git の管理対象には入りません。`projectPath` を指定すると、リポジトリのルートの下の作品フォルダ（例：`project`）を開けます。
+- 作品フォルダは `turbowarp-plus/projects/<id>/` に置き、表示名と時刻は `turbowarp-plus/project-info/<id>.json` に置きます。作品フォルダの外に置くので、Git の管理対象には入りません。フォルダを開くときは、保存したフォルダのルートの作品を読みます。`create(title, {projectPath})` と `directory(id)` は互換のために `projectPath` を受け付けて解決しますが、Editor はその下のフォルダを開きません。
 - 同じ作品フォルダへの保存は、`navigator.locks` で作品ごとに排他します。WebKit は `createWritable({mode: 'exclusive'})` を重ねても拒否しないので、タブ間の排他はロックで行います。保存すると一覧の更新時刻が変わります。
 - `openBrowserProjects(window)` は一覧・作成・削除・保存領域の状態を扱う口です。`chooseBrowserProject` は一覧のダイアログを、`exportBrowserProject` と `zipDirectory` は ZIP の書き出しを、ホストが直接使うためのものです。ZIP は圧縮せず、名前を UTF-8 で書きます。
 
 ブラウザーの中の作品フォルダは、サイトのデータを消したときや、しばらくサイトを使わなかったときに、ブラウザーが消すことがあります（Safari では 7 日間）。最初の作品フォルダを作るときに `navigator.storage.persist()` を求めますが、保証にはなりません。ZIP で書き出すか、Git で GitHub に送って残すようにダイアログで案内します。
 
 保存先選択の導入は、このパッケージを先に公開し、Editor の依存をその版へ固定してからホストの結線を反映します。切り戻すときは Editor の結線と依存の固定を一緒に戻します。OPFS に作成済みの作品は削除せず、ブラウザー内の一覧から開く・ZIP で書き出す経路を維持します。
+
+## 0.17.0 の後の互換性のない変更: 作品はフォルダのルートに置く
+
+0.16.0 では、選んだフォルダの直下に作品がないとき、その中の `project` フォルダの作品を開きました（Project Starter が作るリポジトリの形）。この切り替えはなくしました。一つの Git リポジトリには一つの作品を、そのルートに置きます。
+
+- 作品を `project/` に置いたリポジトリは、プロジェクトフォルダではなくなります。開くとエラーのダイアログを出します。作品のファイルをリポジトリのルートに移すか、`project` フォルダそのものを開いてください。
+- 古い形でブラウザーに保存したフォルダ（`projectPath: 'project'` の項目）も、ほかと同じく保存したフォルダのルートを開くので、エラーのダイアログを出します。このパッケージは移し替えをしません。ZIP で書き出して残し、その `project` フォルダを端末のフォルダとして開くか、sb3-toolchain で SB3 にしてから、ブラウザーの新しいフォルダに保存し直してください。
+- `root` は、ホストが `openDirectory` に `root` を渡したとき以外は、作品フォルダそのものです。
+- `OpenResult` に `'not-project'` が加わりました。結果を `'opened'` と `'cancelled'` だけで見分けていたホストは、これも扱ってください。
 
 ## ブロックパレットの設定
 

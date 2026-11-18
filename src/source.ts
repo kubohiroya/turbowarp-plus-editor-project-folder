@@ -10,6 +10,8 @@ type Target = JsonObject & {isStage: boolean; name: string};
 export const projectFile = 'project.source.json';
 export const manifestFile = 'sb3-source.json';
 export const extensionsFile = 'embedded-extensions.json';
+/** The files at the root of every project folder, the ones `readFolder` reads before anything else. */
+export const projectFolderFiles = [projectFile, manifestFile, extensionsFile] as const;
 /** The ZIP entry of the Editor's screen state, which sb3-toolchain lists in `archiveEntries`. */
 const screenStateEntry = 'tw-plus/workspace.json';
 /** Block palette settings of source format 2. Format 1 folders have no such file. */
@@ -317,8 +319,7 @@ export async function readFolder(directory: FileSystemDirectoryHandle, storage: 
         versions.set(prefix + name, fileVersion(file));
         return [name, await fileBytes(file)] as const;
     };
-    const filenames = [projectFile, manifestFile, extensionsFile];
-    const files = new Map(await Promise.all(filenames.map(name => readEntry(directory, name))));
+    const files = new Map(await Promise.all(projectFolderFiles.map(name => readEntry(directory, name))));
     const decoder = new TextDecoder('utf-8', {fatal: true});
     const projectText = decoder.decode(files.get(projectFile));
     const project = parseProject(projectText);
@@ -374,44 +375,23 @@ export async function readFolder(directory: FileSystemDirectoryHandle, storage: 
         palette: paletteDocument};
 }
 
-/** The project folder inside a repository, as Project Starter makes it. */
-export const projectSubfolder = 'project';
-
 const missingEntry = (error: unknown) => error instanceof DOMException && ['NotFoundError', 'TypeMismatchError'].includes(error.name);
-/** Whether `directory` has an entry called `name`, a file or a folder. */
-async function hasEntry(directory: FileSystemDirectoryHandle, name: string) {
-    for (const get of [() => directory.getFileHandle(name), () => directory.getDirectoryHandle(name)]) {
-        try {
-            await get();
-            return true;
-        } catch (error) {
-            if (!missingEntry(error)) throw error;
-        }
-    }
-    return false;
-}
 
 /**
- * Reads the project in `directory`, or, when the folder has no project of its own, in its `project` folder, as in a
- * repository whose project sits in `project/`. That folder must not be a repository itself. The error is the one
- * for `directory` when neither holds a project.
+ * Whether `directory` is a project folder: its root has every file in `projectFolderFiles`. The files are not read, so a
+ * project folder may still be broken or unsupported, which `readFolder` reports. Other errors, such as a withdrawn
+ * permission, are thrown.
  */
-export async function readProjectFolder(directory: FileSystemDirectoryHandle, storage: Storage): Promise<FolderSource> {
-    try {
-        return await readFolder(directory, storage);
-    } catch (error) {
-        const child = await (async () => {
-            if (await hasEntry(directory, projectFile) || await hasEntry(directory, manifestFile)) return null;
-            const found = await directory.getDirectoryHandle(projectSubfolder);
-            return await hasEntry(found, '.git') ? null : found;
-        })().catch(() => null);
-        if (!child) throw error;
+export async function isProjectFolder(directory: FileSystemDirectoryHandle) {
+    for (const name of projectFolderFiles) {
         try {
-            return await readFolder(child, storage);
-        } catch {
+            await directory.getFileHandle(name);
+        } catch (error) {
+            if (missingEntry(error)) return false;
             throw error;
         }
     }
+    return true;
 }
 
 export const sameBytes = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((value, index) => value === b[index]);
