@@ -399,6 +399,8 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
         readUnsavedFile: (path: string) => session.readUnsavedFile(path),
         subscribeEdits: (listener: () => void) => session.subscribeEdits(listener),
         save: () => withBrowserProject(session.directory, () => session.save()).finally(renderReload),
+        /** Leaves the saved resource intact when another project or a catalog operation replaces it. */
+        detach: () => session.detach(),
         /** The folders kept in this browser, when they are offered, for a host that lists or exports them. */
         browserProjects,
         /**
