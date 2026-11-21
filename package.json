@@ -1,6 +1,6 @@
 {
   "name": "@kubohiroya/turbowarp-plus-editor-project-folder",
-  "version": "0.21.0",
+  "version": "0.21.1",
   "description": "Read and save expanded Scratch project folders in TurboWarp Plus Editor",
   "type": "module",
   "license": "MPL-2.0",
@@ -55,8 +55,8 @@
     "@codemirror/view": "6.43.15",
     "@headless-tree/core": "1.8.0",
     "@headless-tree/react": "1.8.0",
-    "@kubohiroya/sb3-toolchain": "0.28.0",
-    "@kubohiroya/turbowarp-plus-editor-test-runtime": "0.3.0",
+    "@kubohiroya/sb3-toolchain": "0.28.1",
+    "@kubohiroya/turbowarp-plus-editor-test-runtime": "0.3.2",
     "@lezer/highlight": "1.2.5",
     "@playwright/test": "1.64.1",
     "@types/react": "16.14.62",
