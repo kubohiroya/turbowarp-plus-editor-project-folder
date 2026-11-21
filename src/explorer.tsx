@@ -1024,6 +1024,9 @@ function FolderView({vm, locale = 'en', marks: followMarks, fileStatuses: follow
  * It renders nothing while no project folder is mounted for `vm`.
  * Pass the same `marks` function across renders, or the marks are followed again.
  */
+/** The placeholder of the search box above the project folder explorer. */
+export const explorerSearchLabel = (locale = 'en') => /^ja(?:-|$)/i.test(locale) ? '作品のファイルを検索' : 'Search project files';
+
 export function renderProjectFolderExplorer(createElement: (component: any, props: any, ...children: any[]) => any,
     props: FolderViewProps) {
     return createElement(FolderView, props);

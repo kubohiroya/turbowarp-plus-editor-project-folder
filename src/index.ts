@@ -19,7 +19,8 @@ export {openBrowserProjects} from './browser-projects.js';
 export type {BrowserProject, BrowserProjects, BrowserStorageState} from './browser-projects.js';
 export {chooseBrowserProject, exportBrowserProject, zipFileName} from './browser-project-dialog.js';
 export type {BrowserProjectChoice} from './browser-project-dialog.js';
-export {notProjectFolderMessage, showNotProjectFolderDialog} from './not-project-dialog.js';
+export {folderNotEmptyMessage, notProjectFolderMessage, showFolderNotEmptyDialog, showNotProjectFolderDialog} from './not-project-dialog.js';
+export {omittedFilesQuestion, openRepositoryProjectQuestion, openSavedFolderQuestion} from './host-messages.js';
 export {zipDirectory} from './zip.js';
 
 const messages = {
