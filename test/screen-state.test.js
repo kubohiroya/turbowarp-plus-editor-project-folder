@@ -101,7 +101,8 @@ function screenState() {
     };
 }
 
-function editor(screen) {
+function editor(screen, watch = false) {
+    let scan;
     let state = project();
     const stage = {};
     const vm = {
@@ -122,15 +123,17 @@ function editor(screen) {
     const status = {style: {}, dataset: {}, setAttribute() {}, remove() {}, isConnected: true, textContent: ''};
     const document = {
         defaultView: {showDirectoryPicker: () => assert.fail('Unexpected picker call'), setTimeout: () => 0, clearTimeout() {},
-            setInterval: () => 0, clearInterval() {}, addEventListener() {}, removeEventListener() {}},
+            setInterval: run => {scan = run; return 0;}, clearInterval() {}, addEventListener() {}, removeEventListener() {}},
         createElement: tag => tag === 'output' ? status : {style: {}, dataset: {}, setAttribute() {}, remove() {}, append() {},
             addEventListener() {}, children: []},
         addEventListener() {}, removeEventListener() {}, visibilityState: 'visible', body: {append() {}}
     };
     const host = {isProjectDirty: () => false, beforeLoad() {}, onOpened() {}, onSaved() {}, screenState: screen};
+    if (watch) host.blockReload = {isRunning: () => false, subscribe: () => () => {}, onApplied() {}};
     const mounted = mountProjectFolder({vm, document, host, autoReload: false});
     return {
         mounted,
+        async refresh() {scan(); await settle();},
         async save() {
             projectFolderActions(vm).save();
             for (let index = 0; index < 50 && !status.textContent; index++) await new Promise(resolve => setImmediate(resolve));
@@ -193,4 +196,37 @@ test('only a well-formed tree is read from a file', () => {
         {expanded: ['a', 'a/b'], selected: 'a/b'});
     assert.deepEqual(parseExplorerState({expanded: [], selected: '.tw-plus/workspace.json'}), {expanded: []});
     for (const value of [null, [], 'tree', {expanded: 'a'}]) assert.equal(parseExplorerState(value), undefined);
+});
+
+test('an external screen state is passed to the host once and a save sees changes before the next scan', async t => {
+    const screen = screenState();
+    const updates = [];
+    screen.applyFolderUpdate = (previous, text) => {
+        updates.push([previous, text]);
+        return true;
+    };
+    const initial = saved({blockPalette: {stage: {groups: ['sound']}}});
+    const disk = folder(initial);
+    const app = editor(screen, true);
+    t.after(() => app.mounted.dispose());
+    assert.equal(await app.mounted.openDirectory(disk.directory, () => true), 'opened');
+
+    async function change(text) {
+        const parent = await disk.directory.getDirectoryHandle('.tw-plus');
+        const file = await parent.getFileHandle('workspace.json');
+        const writable = await file.createWritable();
+        await writable.write(bytes(text));
+        await writable.close();
+    }
+    const changed = saved({blockPalette: {stage: {groups: ['looks']}}}, 2);
+    await change(changed);
+    await app.refresh();
+    await app.refresh();
+    assert.deepEqual(updates, [[initial, changed]]);
+    const latest = saved({blockPalette: {stage: {groups: ['events']}}}, 3);
+    await change(latest);
+    await app.save();
+    assert.deepEqual(updates, [[initial, changed], [changed, latest]]);
+    await app.refresh();
+    assert.equal(updates.length, 2, 'the Editor does not replay its own save');
 });

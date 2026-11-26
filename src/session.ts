@@ -19,6 +19,7 @@ export interface FolderScreenState {
     serialize(): string | undefined;
     /** Use this text for the next project load. */
     prepareLoad(text: string | undefined): void;
+    applyFolderUpdate?(previous: string | undefined, text: string): boolean;
     /** Add a slice, here the explorer's tree. Returns a function that removes it. */
     register?(key: string, slice: {capture(): unknown; apply?(value: unknown): void}): () => void;
 }
@@ -42,15 +43,16 @@ const slicesOf = (text: string | undefined) => {
 };
 
 /** Write the screen state next to the project. Failing to write it never fails the save. */
-async function writeScreenStateText(directory: FileSystemDirectoryHandle, text: string) {
+async function writeScreenStateText(directory: FileSystemDirectoryHandle, previous: string | undefined, text: string) {
     try {
-        if (slicesOf(await readScreenStateText(directory)) === slicesOf(text)) return;
+        if (slicesOf(previous) === slicesOf(text)) return previous;
         const handle = await (await directory.getDirectoryHandle(editorDirectory, {create: true}))
             .getFileHandle(screenStateFile, {create: true});
         const writable = await handle.createWritable();
         try {
             await writable.write(new TextEncoder().encode(text));
             await writable.close();
+            return text;
         } catch (error) {
             await writable.abort().catch(() => {});
             throw error;
@@ -133,7 +135,8 @@ type PendingUpdate = {update: FolderUpdate; edits: Edits | null; stable: boolean
 type Pending = PendingUpdate | 'structure' | 'waiting';
 /** The folder to open, and the folder the user chose for it, which defaults to `directory`. */
 export type Chosen = {directory: FileSystemDirectoryHandle; root?: FileSystemDirectoryHandle};
-type Session = {source: FolderSource; root: FileSystemDirectoryHandle; baseline: Project; ids: string[] | undefined; stage: object; pending: Pending | null};
+type Session = {source: FolderSource; root: FileSystemDirectoryHandle; baseline: Project; ids: string[] | undefined;
+    stage: object; pending: Pending | null; screenStateText: string | undefined};
 /**
  * `ready`: the change can be applied in place: values and positions, or with `deserializeBlocks`, whole scripts. `full`: the change needs the whole project reloaded.
  * `waiting`: an external write looks incomplete and is checked again. `dirty`, `running` and `busy` hold the change.
@@ -259,9 +262,21 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
             else if (expectingTree) pendingTree = tree;
         }
     });
-    const saveScreenState = async (directory: FileSystemDirectoryHandle) => {
-        const text = host.screenState?.serialize();
-        if (text !== undefined) await writeScreenStateText(directory, text);
+    const applyScreenStateUpdate = (session: Session, text: string | undefined) => {
+        if (text !== undefined && text !== session.screenStateText &&
+            host.screenState?.applyFolderUpdate?.(session.screenStateText, text)) session.screenStateText = text;
+    };
+    const saveScreenState = async (session: Session) => {
+        if (!host.screenState) return;
+        const directory = session.source.directory;
+        const previous = await readScreenStateText(directory);
+        if (disposed || current !== session || vm.runtime.getTargetForStage() !== session.stage) return;
+        // Keep an external update to a slice the Editor did not edit, even if the save precedes the next folder scan.
+        applyScreenStateUpdate(session, previous);
+        const text = host.screenState.serialize();
+        if (text === undefined) return;
+        const saved = await writeScreenStateText(directory, previous, text);
+        if (saved !== undefined) session.screenStateText = saved;
     };
     const loaded = () => setCurrent(null);
     vm.runtime.on('PROJECT_LOADED', loaded);
@@ -310,8 +325,12 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
             const directory = source.directory;
             pendingTree = undefined;
             expectingTree = true;
+            let screenStateText: string | undefined;
             try {
-                if (host.screenState) host.screenState.prepareLoad(await readScreenStateText(directory));
+                if (host.screenState) {
+                    screenStateText = await readScreenStateText(directory);
+                    host.screenState.prepareLoad(screenStateText);
+                }
                 vm.quit();
                 await vm.loadProject(source.loadText, {replaceLegacyExtensions: true});
                 stage = vm.runtime.getTargetForStage();
@@ -321,7 +340,7 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
             if (disposed || !stage || vm.runtime.getTargetForStage() !== stage) return 'cancelled';
             host.onOpened(chosen.directory.name);
             const baseline = snapshot();
-            setCurrent({source, root: chosen.root ?? chosen.directory, stage, baseline, ids: identify(baseline), pending: null});
+            setCurrent({source, root: chosen.root ?? chosen.directory, stage, baseline, ids: identify(baseline), pending: null, screenStateText});
             // The tree may come with the load or right after it; once the folder is current, it is written there.
             expectingTree = false;
             if (pendingTree) writeExplorerState(directory, pendingTree, true);
@@ -490,8 +509,15 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
             if (scanning) return scanning;
             const session = current;
             const baseline = session.baseline;
-            scanning = readUpdate(session).then(pending => {
-                if (current === session && session.baseline === baseline && !busy) session.pending = pending;
+            const previousScreenState = session.screenStateText;
+            const readScreen = host.screenState?.applyFolderUpdate && !host.isProjectDirty() ?
+                readScreenStateText(session.source.directory) : undefined;
+            scanning = Promise.all([readUpdate(session), readScreen]).then(([pending, screenState]) => {
+                if (current !== session || session.baseline !== baseline || busy) return;
+                session.pending = pending;
+                if (!pending && session.screenStateText === previousScreenState && !host.isProjectDirty()) {
+                    applyScreenStateUpdate(session, screenState);
+                }
             }).finally(() => {scanning = null;});
             return scanning;
         },
@@ -612,7 +638,7 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
                     added.set(name, data);
                 }
                 if (!result && !removed.length && !extensionSave.removed.length && !paletteChanged && !manifestChanged) {
-                    await saveScreenState(source.directory);
+                    await saveScreenState(session);
                     if (revision === saveRevision) host.onSaved();
                     notify();
                     return {status: 'unchanged', sourceRemoved: []};
@@ -704,7 +730,7 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
                 session.baseline = edited;
                 session.ids = ids;
                 session.pending = null;
-                await saveScreenState(source.directory);
+                await saveScreenState(session);
                 if (current === session && revision === saveRevision) host.onSaved();
                 notify();
                 return {status: 'saved', sourceRemoved: extensionSave.sourceRemoved};
