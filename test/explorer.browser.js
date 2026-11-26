@@ -127,6 +127,76 @@ async function open(t, {withFolder = true} = {}) {
     return page;
 }
 
+test('renames files and folders without losing contents, and deletes only after confirmation', async t => {
+    const page = await open(t, {withFolder: false});
+    await page.evaluate(() => window.renderWritableExplorer());
+
+    const row = entry => page.locator(`[data-path="${entry}"]`);
+    const inspect = entry => page.evaluate(async entry => {
+        const parts = entry.split('/');
+        let directory = await navigator.storage.getDirectory();
+        try {
+            for (const part of parts.slice(0, -1)) directory = await directory.getDirectoryHandle(part);
+            for await (const handle of directory.values()) {
+                if (handle.name !== parts.at(-1)) continue;
+                return handle.kind === 'directory' ? {kind: 'directory'} :
+                    {kind: 'file', contents: await (await handle.getFile()).text()};
+            }
+            return null;
+        } catch (error) {
+            if (error.name === 'NotFoundError') return null;
+            throw error;
+        }
+    }, entry);
+    const file = {kind: 'file', contents: 'notes\0data'};
+    const rename = async (entry, name) => {
+        await row(entry).click({button: 'right'});
+        await page.getByRole('menuitem', {name: '名前を変更…', exact: true}).click();
+        const dialog = page.getByRole('dialog', {name: '名前を変更', exact: true});
+        const input = dialog.getByRole('textbox', {name: '新しい名前', exact: true});
+        await expect(input).toHaveValue(entry.split('/').at(-1));
+        await input.fill(name);
+        await dialog.getByRole('button', {name: '名前を変更', exact: true}).click();
+        await expect(dialog).toBeHidden();
+        await expect(row(entry)).toHaveCount(0);
+    };
+
+    await row('source').click();
+    await rename('source/note.txt', 'renamed.txt');
+    await expect(row('source/renamed.txt')).toBeVisible();
+    assert.equal(await inspect('source/note.txt'), null);
+    assert.deepEqual(await inspect('source/renamed.txt'), file);
+
+    await rename('source', 'archive');
+    await expect(row('archive')).toBeVisible();
+    assert.equal(await inspect('source'), null);
+    assert.deepEqual(await inspect('archive/renamed.txt'), file);
+    assert.deepEqual(await inspect('archive/empty'), {kind: 'directory'});
+    if (!await row('archive/renamed.txt').count()) await row('archive').click();
+    await expect(row('archive/renamed.txt')).toBeVisible();
+
+    const askToDelete = async () => {
+        await row('archive/renamed.txt').click({button: 'right'});
+        await page.getByRole('menuitem', {name: '削除…', exact: true}).click();
+        const dialog = page.getByRole('dialog', {name: '削除', exact: true});
+        await expect(dialog.getByText('「renamed.txt」を削除しますか？', {exact: true})).toBeVisible();
+        assert.deepEqual(await inspect('archive/renamed.txt'), file);
+        return dialog;
+    };
+    const canceled = await askToDelete();
+    await canceled.getByRole('button', {name: 'キャンセル', exact: true}).click();
+    await expect(canceled).toBeHidden();
+    await expect(row('archive/renamed.txt')).toBeVisible();
+    assert.deepEqual(await inspect('archive/renamed.txt'), file);
+
+    const confirmed = await askToDelete();
+    await confirmed.getByRole('button', {name: '削除', exact: true}).click();
+    await expect(confirmed).toBeHidden();
+    await expect(row('archive/renamed.txt')).toHaveCount(0);
+    assert.equal(await inspect('archive/renamed.txt'), null);
+    assert.deepEqual(await inspect('archive/empty'), {kind: 'directory'});
+});
+
 test('creates folders and moves files and folder trees with drag feedback', async t => {
     const page = await open(t, {withFolder: false});
     await page.evaluate(async () => {
