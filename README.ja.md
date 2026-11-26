@@ -148,3 +148,8 @@ npm への公開は `.github/workflows/release.yml` が行う。`package.json` �
 添付してから npm に公開し、`latest` と `next` をその版に向ける。認証はトークンではなく npm の
 Trusted Publisher（OIDC）で、provenance を付けて公開する。npm 側の設定にはこのワークフローの
 ファイル名をそのまま登録するため、改名するときは npm の設定も合わせる。
+
+
+### 作品フォルダのスナップショット操作（0.22.3）
+
+`./snapshot-workflows` が展開後の作品同一性、欠落ファイルの確認、フォルダ作成・コピーとキャンセルを担当します。配布元の値とnativeコールバックを渡して使用します。由来・依存順・切り戻しは [移管記録](EDITOR-MIGRATION.md) を参照してください。

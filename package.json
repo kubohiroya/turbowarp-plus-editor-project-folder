@@ -1,6 +1,6 @@
 {
   "name": "@kubohiroya/turbowarp-plus-editor-project-folder",
-  "version": "0.22.2",
+  "version": "0.22.3",
   "description": "Read and save expanded Scratch project folders in TurboWarp Plus Editor",
   "type": "module",
   "license": "MPL-2.0",
@@ -18,6 +18,10 @@
     "./explorer": {
       "types": "./dist/explorer.d.ts",
       "default": "./dist/explorer.js"
+    },
+    "./snapshot-workflows": {
+      "types": "./dist/snapshot-workflows.d.ts",
+      "default": "./dist/snapshot-workflows.js"
     }
   },
   "files": [
@@ -27,7 +31,8 @@
     "tsconfig.json",
     "README.ja.md",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "EDITOR-MIGRATION.md"
   ],
   "publishConfig": {
     "access": "public"
