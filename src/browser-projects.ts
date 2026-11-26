@@ -30,6 +30,9 @@ export interface BrowserProjects {
     list(): Promise<BrowserProject[]>;
     create(title: string, options?: {projectPath?: string}): Promise<BrowserProject & {root: FileSystemDirectoryHandle;
         directory: FileSystemDirectoryHandle}>;
+    /** Reads an existing registered project and its local handles without creating storage or using handle resolution. */
+    lookup(id: string): Promise<(BrowserProject & {root: FileSystemDirectoryHandle;
+        directory: FileSystemDirectoryHandle}) | null>;
     /** The stored folder, or `null` when it was deleted. */
     root(id: string): Promise<FileSystemDirectoryHandle | null>;
     /** The folder `projectPath` inside the entry's stored folder. Opening uses `root` instead. */
@@ -129,20 +132,21 @@ export function openBrowserProjects(view: Window): BrowserProjects | null {
     if (typeof storage?.getDirectory !== 'function' || typeof view.crypto?.randomUUID !== 'function') return null;
     const locks = navigator.locks;
     let opened: Promise<{projects: FileSystemDirectoryHandle; info: FileSystemDirectoryHandle}> | undefined;
-    const folders = () => opened ??= (async () => {
-        const top = await (await storage.getDirectory!()).getDirectoryHandle(base, {create: true});
+    const getFolders = async (create: boolean) => {
+        const top = await (await storage.getDirectory!()).getDirectoryHandle(base, {create});
         return {
-            projects: await top.getDirectoryHandle(projectsDirectory, {create: true}),
-            info: await top.getDirectoryHandle(infoDirectory, {create: true})
+            projects: await top.getDirectoryHandle(projectsDirectory, {create}),
+            info: await top.getDirectoryHandle(infoDirectory, {create})
         };
-    })().catch(error => {opened = undefined; throw error;});
+    };
+    const folders = () => opened ??= getFolders(true).catch(error => {opened = undefined; throw error;});
     const checkId = (id: string) => {
         if (!idPattern.test(id)) throw new DOMException('Unknown browser project', 'NotFoundError');
     };
-    const readInfo = async (id: string) => {
+    const readInfo = async (id: string, directory?: FileSystemDirectoryHandle) => {
         checkId(id);
         try {
-            const file = await (await (await folders()).info.getFileHandle(`${id}.json`)).getFile();
+            const file = await (await (directory ?? (await folders()).info).getFileHandle(`${id}.json`)).getFile();
             return file.size > infoMaxBytes ? null : parseInfo(id, await file.text());
         } catch (error) {
             if (missing(error)) return null;
@@ -192,6 +196,19 @@ export function openBrowserProjects(view: Window): BrowserProjects | null {
             // Best effort: the first folder is a good moment to ask, and the answer does not change what happens.
             void projects.persist().catch(() => false);
             return {...project, root: top, directory};
+        },
+        async lookup(id) {
+            if (typeof id !== 'string' || !idPattern.test(id)) return null;
+            try {
+                const {info, projects} = await getFolders(false);
+                const project = await readInfo(id, info);
+                if (!project) return null;
+                const root = await projects.getDirectoryHandle(id);
+                return {...project, root, directory: await resolvePath(root, project.projectPath)};
+            } catch (error) {
+                if (missing(error)) return null;
+                throw error;
+            }
         },
         root,
         async directory(id) {

@@ -131,16 +131,18 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
     const browserProjects: BrowserProjects | null = view && browserStorage !== 'off' &&
         (browserStorage === 'always' || !devicePicker) ? openBrowserProjects(view) : null;
     if ((!devicePicker && !browserProjects) || !vm.runtime?.storage) return null;
+    // The ID is known when the user chose/created the folder or when this tab opened it by ID.
+    const browserProjectIds = new WeakMap<FileSystemDirectoryHandle, string>();
     // Folders in the browser stand in for the picker where there is none.
     const chooseBrowser = async (purpose: 'open' | 'create', title?: string) => {
         const choice = await chooseBrowserProject({document, projects: browserProjects!, locale, purpose, title});
         if (!choice) throw abort();
+        browserProjectIds.set(choice.directory, choice.project.id);
         return choice;
     };
     // The stored folder is opened as a whole, so it is its own root, as a folder on the device is.
     const chooseBrowserFolder = async (): Promise<Chosen> => {
         const {directory} = await chooseBrowser('open');
-        browserRoots.add(directory);
         return {directory};
     };
     const pickDirectory = devicePicker ?
@@ -154,20 +156,22 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
         if (!locations.includes(location)) throw new FolderError('unsupported');
         return location === 'device' ? devicePicker!.call(view, options) : (await chooseBrowser('create', title)).directory;
     };
+    const findBrowserProjectId = async (handle: FileSystemDirectoryHandle | null) =>
+        handle && browserProjects ? browserProjectIds.get(handle) ??
+            (await browserProjects.find(handle).catch(() => null))?.id : undefined;
     /** Runs `run` with the browser folder of `directory` locked against other tabs, and marks it as updated. */
     const withBrowserProject = async <T>(directory: FileSystemDirectoryHandle | null, run: () => Promise<T>) => {
-        const project = directory && browserProjects ? await browserProjects.find(directory).catch(() => null) : null;
-        if (!project) return run();
-        return browserProjects!.exclusive(project.id, async () => {
+        const id = await findBrowserProjectId(directory);
+        if (!id) return run();
+        return browserProjects!.exclusive(id, async () => {
             const result = await run();
-            await browserProjects!.touch(project.id).catch(() => {});
+            await browserProjects!.touch(id).catch(() => {});
             return result;
         });
     };
-    // The stored folders of the browser that were opened or created here, so `location` can answer without waiting.
-    const browserRoots = new WeakSet<FileSystemDirectoryHandle>();
     const classify = async (handle: FileSystemDirectoryHandle) => {
-        if (browserProjects && await browserProjects.find(handle).catch(() => null)) browserRoots.add(handle);
+        const id = await findBrowserProjectId(handle);
+        if (id) browserProjectIds.set(handle, id);
     };
     /**
      * Runs `run` on a new folder in the browser's storage named `title`, and removes the folder again unless `keep`
@@ -177,7 +181,7 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
         keep: (result: T) => boolean) => {
         if (!browserProjects) throw new FolderError('unsupported');
         const project = await browserProjects.create(title || 'Project', {projectPath: ''});
-        browserRoots.add(project.root);
+        browserProjectIds.set(project.root, project.id);
         let kept = false;
         try {
             const result = await run(project.root);
@@ -373,6 +377,12 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
         }
     };
     menus.set(vm, menu);
+    const openDirectory = (directory: FileSystemDirectoryHandle, confirmReplace: () => boolean,
+        root: FileSystemDirectoryHandle | undefined, options: OpenDirectoryOptions): Promise<OpenResult> =>
+        session.openDirectory(directory, confirmReplace, root).then(result => {
+            if (result === 'not-project' && options.notProjectDialog !== false) void notProject(options.locale ?? locale);
+            return result;
+        }).finally(renderReload);
     const unregister = registerFolder(vm, {
         get directory() {return session.directory;},
         get root() {return session.root;},
@@ -392,10 +402,17 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
          */
         openDirectory: (directory: FileSystemDirectoryHandle, confirmReplace: () => boolean,
             root?: FileSystemDirectoryHandle | null, options: OpenDirectoryOptions = {}): Promise<OpenResult> =>
-            classify(root ?? directory).then(() => session.openDirectory(directory, confirmReplace, root ?? undefined)).then(result => {
-                if (result === 'not-project' && options.notProjectDialog !== false) void notProject(options.locale ?? locale);
-                return result;
-            }).finally(renderReload),
+            classify(root ?? directory).then(() => openDirectory(directory, confirmReplace, root ?? undefined, options)),
+        /** Opens an existing browser project by ID, reacquiring its file-system handles in this tab. */
+        async openBrowserProject(id: string, confirmReplace: () => boolean,
+            options: OpenDirectoryOptions = {}): Promise<OpenResult> {
+            const project = await browserProjects?.lookup(id);
+            if (!project) return 'not-project';
+            const {root, directory} = project;
+            browserProjectIds.set(root, id);
+            browserProjectIds.set(directory, id);
+            return openDirectory(directory, confirmReplace, root, options);
+        },
         unsavedPaths: () => session.unsavedPaths(),
         readUnsavedFile: (path: string) => session.readUnsavedFile(path),
         subscribeEdits: (listener: () => void) => session.subscribeEdits(listener),
@@ -508,15 +525,19 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
          */
         async renameCurrentBrowserFolder(title: string) {
             const root = session.root;
-            const entry = root && browserProjects ? await browserProjects.find(root).catch(() => null) : null;
-            if (!entry || session.root !== root) return false;
-            await browserProjects!.rename(entry.id, title);
+            const id = await findBrowserProjectId(root);
+            if (!id || session.root !== root) return false;
+            await browserProjects!.rename(id, title);
             return true;
         },
         /** Where the open folder is: `browser` for a folder kept in this browser, `device`, or `null` with none open. */
         get location(): ProjectFolderLocation | null {
             const root = session.root;
-            return root ? (browserRoots.has(root) ? 'browser' : 'device') : null;
+            return root ? (browserProjectIds.has(root) ? 'browser' : 'device') : null;
+        },
+        /** The known registration ID of the current browser folder, without resolving any handles. */
+        get browserProjectId(): string | null {
+            return session.root && browserProjectIds.get(session.root) || null;
         },
         /** Where new project folders can be made: `device` with the folder picker, and `browser` with the browser's folders. */
         locations: locations as readonly ProjectFolderLocation[],
