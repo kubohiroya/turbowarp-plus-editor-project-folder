@@ -25,15 +25,27 @@ export interface FolderScreenState {
 }
 
 const screenStateMaxBytes = 512 * 1024;
-const notFound = (error: unknown) => error instanceof DOMException && ['NotFoundError', 'TypeMismatchError'].includes(error.name);
+type ReadableScreenState = {kind: 'missing'} | {kind: 'present'; text: string; version: string};
+type ScreenStateRead = ReadableScreenState | {kind: 'unavailable'};
+type ScreenStateSave = 'complete' | 'deferred';
 
-/** The screen state the folder was saved with, or nothing. */
-async function readScreenStateText(directory: FileSystemDirectoryHandle) {
+/** Read only the metadata while the saved workspace is unchanged. */
+async function readScreenState(directory: FileSystemDirectoryHandle,
+    cached?: Extract<ReadableScreenState, {kind: 'present'}>): Promise<ScreenStateRead> {
+    let handle: FileSystemFileHandle;
     try {
-        const file = await (await (await directory.getDirectoryHandle(editorDirectory)).getFileHandle(screenStateFile)).getFile();
-        return file.size > screenStateMaxBytes ? undefined : await file.text();
+        handle = await (await directory.getDirectoryHandle(editorDirectory)).getFileHandle(screenStateFile);
     } catch (error) {
-        if (!notFound(error)) console.warn('The screen state of the project folder could not be read', error);
+        return error instanceof DOMException && error.name === 'NotFoundError' ? {kind: 'missing'} : {kind: 'unavailable'};
+    }
+    try {
+        const file = await handle.getFile();
+        if (file.size > screenStateMaxBytes) return {kind: 'unavailable'};
+        const version = fileVersion(file);
+        return cached?.version === version ? cached : {kind: 'present', version, text: await file.text()};
+    } catch {
+        // The handle can become unreadable during a concurrent write or replacement.
+        return {kind: 'unavailable'};
     }
 }
 
@@ -42,23 +54,34 @@ const slicesOf = (text: string | undefined) => {
     try { return JSON.stringify(JSON.parse(text!).slices); } catch { return undefined; }
 };
 
-/** Write the screen state next to the project. Failing to write it never fails the save. */
-async function writeScreenStateText(directory: FileSystemDirectoryHandle, previous: string | undefined, text: string) {
+type ExclusiveWritableOptions = FileSystemCreateWritableOptions & {mode?: 'exclusive'};
+
+/** Commit the workspace only if the version read for this save still matches the disk. */
+async function writeScreenStateText(directory: FileSystemDirectoryHandle, previous: ReadableScreenState, text: string,
+    canWrite: () => boolean): Promise<ScreenStateSave> {
     try {
-        if (slicesOf(previous) === slicesOf(text)) return previous;
-        const handle = await (await directory.getDirectoryHandle(editorDirectory, {create: true}))
-            .getFileHandle(screenStateFile, {create: true});
-        const writable = await handle.createWritable();
+        const folder = await directory.getDirectoryHandle(editorDirectory, {create: previous.kind === 'missing'});
+        const handle = await folder.getFileHandle(screenStateFile, {create: previous.kind === 'missing'});
+        const options: ExclusiveWritableOptions = {mode: 'exclusive'};
+        const writable = await handle.createWritable(options);
         try {
             await writable.write(new TextEncoder().encode(text));
+            const latest = await readScreenState(directory);
+            // Creating a missing file leaves an empty file on disk until the writable commits.
+            const unchanged = latest.kind === 'present' && (previous.kind === 'present' ?
+                latest.version === previous.version && latest.text === previous.text : latest.text === '');
+            if (!unchanged || !canWrite()) {
+                await writable.abort();
+                return 'deferred';
+            }
             await writable.close();
-            return text;
+            return 'complete';
         } catch (error) {
             await writable.abort().catch(() => {});
             throw error;
         }
-    } catch (error) {
-        console.warn('The screen state of the project folder could not be saved', error);
+    } catch {
+        return 'deferred';
     }
 }
 
@@ -136,7 +159,8 @@ type Pending = PendingUpdate | 'structure' | 'waiting';
 /** The folder to open, and the folder the user chose for it, which defaults to `directory`. */
 export type Chosen = {directory: FileSystemDirectoryHandle; root?: FileSystemDirectoryHandle};
 type Session = {source: FolderSource; root: FileSystemDirectoryHandle; baseline: Project; ids: string[] | undefined;
-    stage: object; pending: Pending | null; screenStateText: string | undefined};
+    stage: object; pending: Pending | null; screenStateText: string | undefined;
+    screenStateCache?: Extract<ReadableScreenState, {kind: 'present'}>; pendingScreenSave?: number};
 /**
  * `ready`: the change can be applied in place: values and positions, or with `deserializeBlocks`, whole scripts. `full`: the change needs the whole project reloaded.
  * `waiting`: an external write looks incomplete and is checked again. `dirty`, `running` and `busy` hold the change.
@@ -150,7 +174,7 @@ export type ReloadKind = 'partial' | 'full' | null;
  * `embedded-extensions.json`, so it is not a project folder and nothing was opened either.
  */
 export type OpenResult = 'opened' | 'cancelled' | 'not-project';
-type SaveResult = {status: 'saved' | 'unchanged'; sourceRemoved: string[]};
+type SaveResult = {status: 'saved' | 'unchanged'; sourceRemoved: string[]; screenState: ScreenStateSave};
 type SaveDirectory = {directory: FileSystemDirectoryHandle; files: Map<string, Uint8Array>; prefix: string};
 
 type VMAsset = {assetId: string; dataFormat: string; data?: Uint8Array};
@@ -178,7 +202,8 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
     let busy = false;
     let disposed = false;
     let revision = 0;
-    let scanning: Promise<void> | null = null;
+    let scanning: Promise<boolean> | null = null;
+    let forceScreenRead = false;
     const snapshot = () => parseProject(vm.toJSON(undefined, {allowOptimization: false}));
     type RuntimeTarget = {id?: string; isStage: boolean; isOriginal: boolean; getName(): string; sprite?: {
         costumes?: readonly {asset?: VMAsset}[]; sounds?: readonly {asset?: VMAsset}[];
@@ -262,21 +287,43 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
             else if (expectingTree) pendingTree = tree;
         }
     });
-    const applyScreenStateUpdate = (session: Session, text: string | undefined) => {
-        if (text !== undefined && text !== session.screenStateText &&
-            host.screenState?.applyFolderUpdate?.(session.screenStateText, text)) session.screenStateText = text;
+    const applyScreenStateUpdate = (session: Session, disk: ScreenStateRead) => {
+        if (disk.kind !== 'present') {
+            session.screenStateCache = undefined;
+            return;
+        }
+        if (disk.text === session.screenStateText ||
+            host.screenState?.applyFolderUpdate?.(session.screenStateText, disk.text)) {
+            session.screenStateText = disk.text;
+            session.screenStateCache = disk;
+        } else session.screenStateCache = undefined;
     };
-    const saveScreenState = async (session: Session) => {
-        if (!host.screenState) return;
+    const saveScreenState = async (session: Session, editRevision?: number): Promise<ScreenStateSave> => {
+        const screen = host.screenState;
+        if (!screen || screen.serialize() === undefined) return 'complete';
         const directory = session.source.directory;
-        const previous = await readScreenStateText(directory);
-        if (disposed || current !== session || vm.runtime.getTargetForStage() !== session.stage) return;
-        // Keep an external update to a slice the Editor did not edit, even if the save precedes the next folder scan.
-        applyScreenStateUpdate(session, previous);
-        const text = host.screenState.serialize();
-        if (text === undefined) return;
-        const saved = await writeScreenStateText(directory, previous, text);
-        if (saved !== undefined) session.screenStateText = saved;
+        const canWrite = () => !disposed && current === session && vm.runtime.getTargetForStage() === session.stage &&
+            (editRevision === undefined || revision === editRevision);
+        const disk = await readScreenState(directory);
+        if (!canWrite() || disk.kind === 'unavailable') return 'deferred';
+        if (disk.kind === 'present' && slicesOf(disk.text) === undefined) return 'deferred';
+        // Preserve external changes to a slice the Editor did not edit, even before the next scan.
+        applyScreenStateUpdate(session, disk);
+        const text = screen.serialize();
+        if (text === undefined) return 'complete';
+        if (disk.kind === 'present' && slicesOf(disk.text) === slicesOf(text)) return 'complete';
+        const saved = await writeScreenStateText(directory, disk, text, canWrite);
+        if (saved === 'complete') {
+            session.screenStateText = text;
+            session.screenStateCache = undefined;
+        }
+        return saved;
+    };
+    const finishSave = async (session: Session, saveRevision: number) => {
+        const screenState = await saveScreenState(session);
+        session.pendingScreenSave = screenState === 'deferred' ? saveRevision : undefined;
+        if (screenState === 'complete' && current === session && revision === saveRevision) host.onSaved();
+        return screenState;
     };
     const loaded = () => setCurrent(null);
     vm.runtime.on('PROJECT_LOADED', loaded);
@@ -325,11 +372,12 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
             const directory = source.directory;
             pendingTree = undefined;
             expectingTree = true;
-            let screenStateText: string | undefined;
+            let screenStateCache: Session['screenStateCache'];
             try {
                 if (host.screenState) {
-                    screenStateText = await readScreenStateText(directory);
-                    host.screenState.prepareLoad(screenStateText);
+                    const disk = await readScreenState(directory);
+                    if (disk.kind === 'present') screenStateCache = disk;
+                    host.screenState.prepareLoad(screenStateCache?.text);
                 }
                 vm.quit();
                 await vm.loadProject(source.loadText, {replaceLegacyExtensions: true});
@@ -340,7 +388,8 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
             if (disposed || !stage || vm.runtime.getTargetForStage() !== stage) return 'cancelled';
             host.onOpened(chosen.directory.name);
             const baseline = snapshot();
-            setCurrent({source, root: chosen.root ?? chosen.directory, stage, baseline, ids: identify(baseline), pending: null, screenStateText});
+            setCurrent({source, root: chosen.root ?? chosen.directory, stage, baseline, ids: identify(baseline), pending: null,
+                screenStateText: screenStateCache?.text, screenStateCache});
             // The tree may come with the load or right after it; once the folder is current, it is written there.
             expectingTree = false;
             if (pendingTree) writeExplorerState(directory, pendingTree, true);
@@ -504,20 +553,39 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
             }
             return current === session ? {base, editor, disk} : null;
         },
-        refresh(): Promise<void> {
-            if (disposed || busy || !current || !host.blockReload) return Promise.resolve();
+        refresh(force = false, retrySave = (save: () => Promise<ScreenStateSave>) => save()): Promise<boolean> {
+            forceScreenRead ||= force;
+            if (disposed || busy || !current || !host.blockReload) return Promise.resolve(false);
             if (scanning) return scanning;
             const session = current;
+            if (session.pendingScreenSave === revision) {
+                const editRevision = revision;
+                const save = () => saveScreenState(session, editRevision);
+                busy = true;
+                scanning = Promise.resolve().then(() => retrySave(save)).then(status => {
+                    if (status !== 'complete' || current !== session || revision !== editRevision) return false;
+                    session.pendingScreenSave = undefined;
+                    host.onSaved();
+                    notify();
+                    return true;
+                }).finally(() => {busy = false; scanning = null;});
+                return scanning;
+            }
             const baseline = session.baseline;
             const previousScreenState = session.screenStateText;
-            const readScreen = host.screenState?.applyFolderUpdate && !host.isProjectDirty() ?
-                readScreenStateText(session.source.directory) : undefined;
-            scanning = Promise.all([readUpdate(session), readScreen]).then(([pending, screenState]) => {
-                if (current !== session || session.baseline !== baseline || busy) return;
+            let readScreen: Promise<ScreenStateRead> | undefined;
+            if (host.screenState?.applyFolderUpdate && !host.isProjectDirty()) {
+                if (forceScreenRead) session.screenStateCache = undefined;
+                forceScreenRead = false;
+                readScreen = readScreenState(session.source.directory, session.screenStateCache);
+            }
+            scanning = Promise.all([readUpdate(session), readScreen]).then(([pending, disk]) => {
+                if (current !== session || session.baseline !== baseline || busy) return false;
                 session.pending = pending;
-                if (!pending && session.screenStateText === previousScreenState && !host.isProjectDirty()) {
-                    applyScreenStateUpdate(session, screenState);
+                if (disk && !pending && session.screenStateText === previousScreenState && !host.isProjectDirty()) {
+                    applyScreenStateUpdate(session, disk);
                 }
+                return false;
             }).finally(() => {scanning = null;});
             return scanning;
         },
@@ -638,10 +706,9 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
                     added.set(name, data);
                 }
                 if (!result && !removed.length && !extensionSave.removed.length && !paletteChanged && !manifestChanged) {
-                    await saveScreenState(session);
-                    if (revision === saveRevision) host.onSaved();
+                    const screenState = await finishSave(session, saveRevision);
                     notify();
-                    return {status: 'unchanged', sourceRemoved: []};
+                    return {status: 'unchanged', sourceRemoved: [], screenState};
                 }
                 const manifest = manifestChanged ? saveManifest(source, added.keys(), removed, paletteBytes !== null) : null;
                 const root = {directory: source.directory, files: source.files, prefix: ''};
@@ -730,10 +797,9 @@ export function createFolderSession(vm: FolderVM, host: FolderHost) {
                 session.baseline = edited;
                 session.ids = ids;
                 session.pending = null;
-                await saveScreenState(session);
-                if (current === session && revision === saveRevision) host.onSaved();
+                const screenState = await finishSave(session, saveRevision);
                 notify();
-                return {status: 'saved', sourceRemoved: extensionSave.sourceRemoved};
+                return {status: 'saved', sourceRemoved: extensionSave.sourceRemoved, screenState};
             } finally {
                 busy = false;
                 notifyEdits();
