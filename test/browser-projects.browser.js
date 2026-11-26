@@ -23,6 +23,80 @@ const engines = [
 ];
 
 for (const [name, launch, withoutPicker, browserStorage] of engines) {
+    test(`${name}: reopen registered project IDs in a new tab without resolving or creating folders`, async t => {
+        const temp = await mkdtemp(path.join(tmpdir(), 'twpf-project-id-'));
+        t.after(() => rm(temp, {recursive: true, force: true}));
+        const server = await serveEditorRuntime({script: fileURLToPath(new URL('./browser-projects-page.js', import.meta.url))});
+        const context = await launch(path.join(temp, 'profile'));
+        t.after(async () => {await context.close(); await context.browser()?.close(); await server.close();});
+        const first = context.pages()[0] ?? await context.newPage();
+        const errors = [];
+        first.on('pageerror', error => errors.push(error.message));
+        t.after(() => assert.deepEqual(errors, []));
+        await first.goto(server.url);
+        const options = {project, withoutPicker, browserStorage};
+        assert.equal(await first.evaluate(options => setup(options), options), true);
+        const unknown = await first.evaluate(async () => {
+            const initial = await navigator.storage.getDirectory();
+            const ids = ['../invalid', 'unknown-id'];
+            return {results: await Promise.all(ids.map(id => subject.folder.openBrowserProject(id, () => {
+                throw new Error('An unknown project must not try to replace the open project');
+            }))), names: await Array.fromAsync(initial.keys()), opened: subject.folder.directory};
+        });
+        assert.deepEqual(unknown, {results: ['not-project', 'not-project'], names: [], opened: null});
+
+        await first.evaluate(() => {void subject.create('Original', 'browser');});
+        const createDialog = first.locator('dialog[data-browser-projects="create"]');
+        await createDialog.getByRole('button', {name: '作成'}).click();
+        await expect.poll(() => first.evaluate(() => subject.created)).toBe('opened');
+        const [stored] = await first.evaluate(() => subject.projects.list());
+        assert.equal(stored.projectPath, '');
+        assert.equal(await first.evaluate(() => subject.folder.browserProjectId), stored.id);
+        const tab = await context.newPage();
+        tab.on('pageerror', error => errors.push(error.message));
+        await tab.goto(server.url);
+        assert.equal(await tab.evaluate(options => setup({...options, resetStorage: false}), options), true);
+
+        const opened = await tab.evaluate(async id => {
+            // Reject all handle resolution in the receiving tab, including any implicit save/rename classification.
+            const root = await navigator.storage.getDirectory();
+            const prototype = Object.getPrototypeOf(root);
+            const restore = Object.getOwnPropertyDescriptor(prototype, 'resolve');
+            let resolves = 0, locks = 0;
+            Object.defineProperty(prototype, 'resolve', {configurable: true, value() {
+                resolves++;
+                throw new Error('A local ID must not call handle.resolve()');
+            }});
+            const projects = subject.folder.browserProjects;
+            const exclusive = projects.exclusive;
+            projects.exclusive = (id, action) => {locks++; return exclusive(id, action);};
+            try {
+                const status = await subject.folder.openBrowserProject(id, () => true);
+                const sameObject = subject.folder.root === subject.folder.directory;
+                const location = subject.folder.location;
+                const stillOpen = await subject.folder.openBrowserProject('unknown-id', () => {
+                    throw new Error('An unknown project must leave the current project open');
+                });
+                subject.runtime.vm.runtime.targets.find(target => !target.isStage).setXY(70, 80);
+                const saved = await subject.folder.save();
+                const renamed = await subject.folder.renameCurrentBrowserFolder('Renamed');
+                return {status, sameObject, location, stillOpen, id: subject.folder.browserProjectId, saves: saved.status, renamed, resolves, locks};
+            } finally {
+                projects.exclusive = exclusive;
+                if (restore) Object.defineProperty(prototype, 'resolve', restore);
+                else delete prototype.resolve;
+            }
+        }, stored.id);
+        assert.deepEqual(opened, {status: 'opened', sameObject: true, location: 'browser',
+            stillOpen: 'not-project', id: stored.id, saves: 'saved', renamed: true, resolves: 0, locks: 1});
+        const after = await first.evaluate(() => subject.projects.list());
+        assert.deepEqual(after.map(project => [project.id, project.title]), [[stored.id, 'Renamed']]);
+        const cat = (await first.evaluate(id => subject.storedProject(id), stored.id)).targets.find(target => target.name === 'Cat');
+        assert.deepEqual([cat.x, cat.y], [70, 80]);
+    });
+}
+
+for (const [name, launch, withoutPicker, browserStorage] of engines) {
     test(`${name}: create, save, reopen, export and delete a project folder kept in the browser`, async t => {
         const temp = await mkdtemp(path.join(tmpdir(), 'twpf-browser-projects-'));
         const server = await serveEditorRuntime({script: fileURLToPath(new URL('./browser-projects-page.js', import.meta.url))});

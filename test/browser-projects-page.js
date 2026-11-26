@@ -7,11 +7,11 @@ import * as ReactDOM from 'react-dom';
 
 const encode = value => new TextEncoder().encode(`${JSON.stringify(value, null, 2)}\n`);
 
-globalThis.setup = async ({project, withoutPicker, browserStorage = 'fallback', locale = 'ja'}) => {
+globalThis.setup = async ({project, withoutPicker, browserStorage = 'fallback', locale = 'ja', resetStorage = true}) => {
     // Chromium has the picker; take it away so the browser's folders stand in for it as they do in Safari.
     if (withoutPicker) Object.defineProperty(window, 'showDirectoryPicker', {value: undefined, configurable: true});
     const root = await navigator.storage.getDirectory();
-    for await (const name of root.keys()) await root.removeEntry(name, {recursive: true});
+    if (resetStorage) for await (const name of root.keys()) await root.removeEntry(name, {recursive: true});
     globalThis.pickerCalls = 0;
     if (!withoutPicker && typeof window.showDirectoryPicker === 'function') {
         window.showDirectoryPicker = async () => {
