@@ -29,6 +29,11 @@ function folder(screenState) {
     ]);
     if (screenState !== undefined) directories.set('.tw-plus', new Map([['workspace.json', entry(bytes(screenState))]]));
     const writes = [];
+    let workspaceReads = 0;
+    let workspaceWriters = 0;
+    let blocked;
+    let beforeWorkspaceCommit;
+    const workspace = (path, name) => path === '.tw-plus' && name === 'workspace.json';
     const directory = path => ({
         kind: 'directory', name: path || 'Folder',
         async getFileHandle(name, options = {}) {
@@ -41,12 +46,30 @@ function folder(screenState) {
                 kind: 'file', name,
                 async getFile() {
                     const file = files.get(name);
-                    return new File([file.data], name, {lastModified: file.lastModified});
+                    if (workspace(path, name) && blocked === 'metadata') throw new DOMException('File locked', 'NotReadableError');
+                    const snapshot = new File([file.data], name, {lastModified: file.lastModified});
+                    if (workspace(path, name)) {
+                        const text = snapshot.text.bind(snapshot);
+                        snapshot.text = async () => {
+                            workspaceReads++;
+                            if (blocked === 'contents') throw new DOMException('File locked', 'NotReadableError');
+                            return text();
+                        };
+                    }
+                    return snapshot;
                 },
                 async createWritable() {
+                    if (workspace(path, name)) workspaceWriters++;
                     let pending = new Uint8Array();
                     return {
-                        async write(data) {pending = new Uint8Array(data);},
+                        async write(data) {
+                            pending = new Uint8Array(data);
+                            if (workspace(path, name) && beforeWorkspaceCommit) {
+                                const operation = beforeWorkspaceCommit;
+                                beforeWorkspaceCommit = undefined;
+                                operation();
+                            }
+                        },
                         async close() {
                             files.set(name, entry(pending));
                             writes.push(path ? `${path}/${name}` : name);
@@ -71,7 +94,16 @@ function folder(screenState) {
         const file = directories.get('.tw-plus')?.get('workspace.json');
         return file && new TextDecoder().decode(file.data);
     };
-    return {directory: directory(''), writes, read};
+    return {directory: directory(''), writes, read,
+        get workspaceReads() {return workspaceReads;}, get workspaceWriters() {return workspaceWriters;},
+        lock(where) {blocked = where;},
+        onBeforeWorkspaceCommit(fn) {beforeWorkspaceCommit = fn;},
+        replace(text, keepTimestamp = false) {
+            const files = directories.get('.tw-plus');
+            const previous = files.get('workspace.json');
+            files.set('workspace.json', keepTimestamp ? {...previous, data: bytes(text)} : entry(bytes(text)));
+        }
+    };
 }
 
 /** The Editor's screen state as the workbench provides it, with the slices the test registers. */
@@ -101,7 +133,12 @@ function screenState() {
     };
 }
 
-function editor(screen) {
+function editor(screen, watch = false) {
+    let scan;
+    let observerSignal;
+    let scheduled;
+    let markedSaved = 0;
+    const vmListeners = new Map();
     let state = project();
     const stage = {};
     const vm = {
@@ -111,7 +148,9 @@ function editor(screen) {
             get targets() {return state.targets.map(target => ({id: 'stage', isStage: true, isOriginal: true, getName: () => target.name}));},
             getTargetForStage: () => stage, on() {}, off() {}
         },
-        on() {}, off() {}, quit() {},
+        on(event, listener) {vmListeners.set(event, listener);},
+        off(event) {vmListeners.delete(event);},
+        quit() {},
         async loadProject(text) {
             state = JSON.parse(text);
             // The workbench gives the slices their values after the VM finished loading.
@@ -121,16 +160,29 @@ function editor(screen) {
     };
     const status = {style: {}, dataset: {}, setAttribute() {}, remove() {}, isConnected: true, textContent: ''};
     const document = {
-        defaultView: {showDirectoryPicker: () => assert.fail('Unexpected picker call'), setTimeout: () => 0, clearTimeout() {},
-            setInterval: () => 0, clearInterval() {}, addEventListener() {}, removeEventListener() {}},
+        defaultView: {showDirectoryPicker: () => assert.fail('Unexpected picker call'),
+            FileSystemObserver: class {
+                constructor(callback) {observerSignal = callback;}
+                async observe() {}
+                disconnect() {}
+            },
+            setTimeout: run => {scheduled = run; return 0;}, clearTimeout() {},
+            setInterval: run => {scan = run; return 0;}, clearInterval() {}, addEventListener() {}, removeEventListener() {}},
         createElement: tag => tag === 'output' ? status : {style: {}, dataset: {}, setAttribute() {}, remove() {}, append() {},
             addEventListener() {}, children: []},
         addEventListener() {}, removeEventListener() {}, visibilityState: 'visible', body: {append() {}}
     };
-    const host = {isProjectDirty: () => false, beforeLoad() {}, onOpened() {}, onSaved() {}, screenState: screen};
+    const host = {isProjectDirty: () => false, beforeLoad() {}, onOpened() {},
+        onSaved() {markedSaved++;}, screenState: screen};
+    if (watch) host.blockReload = {isRunning: () => false, subscribe: () => () => {}, onApplied() {}};
     const mounted = mountProjectFolder({vm, document, host, autoReload: false});
     return {
         mounted,
+        get markedSaved() {return markedSaved;},
+        get status() {return status.textContent;},
+        editTempo(tempo) {state.targets[0].tempo = tempo; vmListeners.get('PROJECT_CHANGED')?.();},
+        async refresh() {scan(); await settle();},
+        async observe() {observerSignal(); scheduled(); await settle();},
         async save() {
             projectFolderActions(vm).save();
             for (let index = 0; index < 50 && !status.textContent; index++) await new Promise(resolve => setImmediate(resolve));
@@ -193,4 +245,118 @@ test('only a well-formed tree is read from a file', () => {
         {expanded: ['a', 'a/b'], selected: 'a/b'});
     assert.deepEqual(parseExplorerState({expanded: [], selected: '.tw-plus/workspace.json'}), {expanded: []});
     for (const value of [null, [], 'tree', {expanded: 'a'}]) assert.equal(parseExplorerState(value), undefined);
+});
+
+test('an external screen state is passed to the host once and a save sees changes before the next scan', async t => {
+    const screen = screenState();
+    const updates = [];
+    screen.applyFolderUpdate = (previous, text) => {
+        updates.push([previous, text]);
+        return true;
+    };
+    const initial = saved({blockPalette: {stage: {groups: ['sound']}}});
+    const disk = folder(initial);
+    const app = editor(screen, true);
+    t.after(() => app.mounted.dispose());
+    assert.equal(await app.mounted.openDirectory(disk.directory, () => true), 'opened');
+
+    async function change(text) {
+        const parent = await disk.directory.getDirectoryHandle('.tw-plus');
+        const file = await parent.getFileHandle('workspace.json');
+        const writable = await file.createWritable();
+        await writable.write(bytes(text));
+        await writable.close();
+    }
+    const changed = saved({blockPalette: {stage: {groups: ['looks']}}}, 2);
+    await change(changed);
+    await app.refresh();
+    await app.refresh();
+    assert.deepEqual(updates, [[initial, changed]]);
+    const latest = saved({blockPalette: {stage: {groups: ['events']}}}, 3);
+    await change(latest);
+    await app.save();
+    assert.deepEqual(updates, [[initial, changed], [changed, latest]]);
+    await app.refresh();
+    assert.equal(updates.length, 2, 'the Editor does not replay its own save');
+});
+
+test('an unchanged workspace only reads metadata, and a watch notification rechecks equal-sized content', async t => {
+    const initial = saved({blockPalette: {stage: {groups: ['sound']}}});
+    const changed = saved({blockPalette: {stage: {groups: ['looks']}}});
+    assert.equal(initial.length, changed.length);
+    const disk = folder(initial);
+    const screen = screenState();
+    const updates = [];
+    screen.applyFolderUpdate = (before, next) => {updates.push([before, next]); return true;};
+    const app = editor(screen, true);
+    t.after(() => app.mounted.dispose());
+    assert.equal(await app.mounted.openDirectory(disk.directory, () => true), 'opened');
+    await app.refresh();
+    await app.refresh();
+    assert.equal(disk.workspaceReads, 1);
+    disk.replace(changed, true);
+    await app.observe();
+    assert.deepEqual(updates, [[initial, changed]]);
+    assert.equal(disk.workspaceReads, 2);
+});
+
+for (const locked of ['metadata', 'contents']) {
+    test(`a workspace lock during ${locked} defers only the workspace write and retries after unlock`, async t => {
+        const initial = saved({drawer: 'project'});
+        const latest = saved({drawer: 'project', blockPalette: {stage: {groups: ['looks']}}});
+        const disk = folder(initial);
+        const screen = screenState();
+        const updates = [];
+        let selected;
+        screen.register('blockPalette', {capture: () => selected});
+        screen.applyFolderUpdate = (before, next) => {
+            updates.push([before, next]);
+            selected = JSON.parse(next).slices.blockPalette;
+            return true;
+        };
+        const app = editor(screen, true);
+        t.after(() => app.mounted.dispose());
+        assert.equal(await app.mounted.openDirectory(disk.directory, () => true), 'opened');
+        disk.replace(latest);
+        disk.lock(locked);
+        app.editTempo(80);
+        assert.match(await app.save(), /^Project folder saved\. Workspace settings could not be saved yet/);
+        assert.deepEqual(disk.writes, ['project.source.json']);
+        assert.equal(disk.workspaceWriters, 0);
+        assert.equal(app.markedSaved, 0);
+        assert.deepEqual(updates, []);
+
+        await app.refresh();
+        assert.equal(disk.workspaceWriters, 0);
+        disk.lock(undefined);
+        await app.refresh();
+        assert.deepEqual(updates, [[initial, latest]]);
+        assert.equal(app.markedSaved, 1);
+        assert.equal(app.status, 'Workspace settings saved.');
+        assert.equal(disk.read(), latest);
+    });
+}
+
+test('a workspace replace during the save is preserved and a newer edit waits for another Save', async t => {
+    const initial = saved({drawer: 'old'});
+    const concurrent = saved({drawer: 'external'});
+    const disk = folder(initial);
+    const screen = screenState();
+    screen.applyFolderUpdate = () => true;
+    const app = editor(screen, true);
+    t.after(() => app.mounted.dispose());
+    assert.equal(await app.mounted.openDirectory(disk.directory, () => true), 'opened');
+    disk.onBeforeWorkspaceCommit(() => disk.replace(concurrent));
+    assert.match(await app.save(), /^Project data is unchanged\. Workspace settings could not be saved yet/);
+    assert.equal(disk.read(), concurrent);
+    assert.deepEqual(disk.writes, []);
+    assert.equal(app.markedSaved, 0);
+
+    app.editTempo(90);
+    await app.refresh();
+    assert.equal(disk.workspaceWriters, 1);
+    assert.equal(disk.read(), concurrent);
+    assert.equal(await app.save(), 'Project folder saved.');
+    assert.equal(JSON.parse(disk.read()).slices.drawer, 'project');
+    assert.equal(app.markedSaved, 1);
 });

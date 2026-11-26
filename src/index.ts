@@ -29,6 +29,9 @@ const messages = {
         deviceUnavailable: 'This browser cannot open folders on your device. Use Chrome or Edge, or open a folder saved in this browser.',
         replace: 'Replace the open project and discard its unsaved changes?',
         opened: 'Project folder opened.', saved: 'Project folder saved.', unchanged: 'No changes to save.',
+        projectUnchanged: 'Project data is unchanged.',
+        workspacePending: 'Workspace settings could not be saved yet. The Editor will retry. Save again if you make more edits.',
+        workspaceSaved: 'Workspace settings saved.',
         sourceRemoved: (ids: string[]) => `Removed source metadata for replaced extensions: ${ids.join(', ')}. Use sb3-toolchain to fetch the managed sources again if you need to keep their provenance.`,
         conflict: 'The project folder changed outside the editor or is no longer open. Your edits are still in the editor.',
         unsupported: 'This project or edit cannot be saved to a project folder yet.',
@@ -51,6 +54,9 @@ const messages = {
         deviceUnavailable: 'このブラウザーでは端末のフォルダを開けません。Chrome か Edge を使うか、ブラウザーに保存したフォルダを開いてください。',
         replace: '未保存の変更を破棄して、別の作品を開きますか？',
         opened: 'プロジェクトフォルダを開きました。', saved: 'プロジェクトフォルダに保存しました。', unchanged: '保存する変更はありません。',
+        projectUnchanged: '作品本体に変更はありません。',
+        workspacePending: 'ワークスペース設定は保存待ちです。再試行します。編集を続けた場合は、もう一度保存してください。',
+        workspaceSaved: 'ワークスペース設定を保存しました。',
         sourceRemoved: (ids: string[]) => `差し替えた拡張機能（${ids.join('、')}）の出どころ情報を削除しました。出どころを保つには、sb3-toolchain で拡張機能を取得し直してください。`,
         conflict: '外部でフォルダが変更されたか、作品が切り替わりました。編集中の変更はエディターに残っています。',
         unsupported: 'この作品または編集は、まだプロジェクトフォルダに保存できません。',
@@ -160,12 +166,13 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
         handle && browserProjects ? browserProjectIds.get(handle) ??
             (await browserProjects.find(handle).catch(() => null))?.id : undefined;
     /** Runs `run` with the browser folder of `directory` locked against other tabs, and marks it as updated. */
-    const withBrowserProject = async <T>(directory: FileSystemDirectoryHandle | null, run: () => Promise<T>) => {
+    const withBrowserProject = async <T>(directory: FileSystemDirectoryHandle | null, run: () => Promise<T>,
+        saved: (result: T) => boolean = () => true) => {
         const id = await findBrowserProjectId(directory);
         if (!id) return run();
         return browserProjects!.exclusive(id, async () => {
             const result = await run();
-            await browserProjects!.touch(id).catch(() => {});
+            if (saved(result)) await browserProjects!.touch(id).catch(() => {});
             return result;
         });
     };
@@ -301,9 +308,17 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
                 if (directory) observer.observe(directory, {recursive: true}).catch(() => {});
             }
         };
+        let workspaceNotification = false;
         const refresh = () => {
             if (document.visibilityState !== 'visible') return;
-            void session.refresh().then(() => {
+            const force = workspaceNotification;
+            workspaceNotification = false;
+            const directory = session.directory;
+            void session.refresh(force, save => {
+                const locked = () => withBrowserProject(directory, save, result => result === 'complete');
+                return host.saveWithLock?.(locked) ?? locked();
+            }).then(workspaceSaved => {
+                if (workspaceSaved) report(message.workspaceSaved);
                 renderReload();
                 // Look again soon after a new or incomplete change instead of waiting for the next interval.
                 if (session.settling) schedule(500);
@@ -315,7 +330,10 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
         };
         if (view.FileSystemObserver) {
             try {
-                observer = new view.FileSystemObserver(() => schedule(300));
+                observer = new view.FileSystemObserver(() => {
+                    workspaceNotification = true;
+                    schedule(300);
+                });
             } catch {
                 observer = null;
             }
@@ -368,9 +386,11 @@ export function mountProjectFolder({vm, document, host, locale = 'en', autoReloa
                     if (session.directory !== directory) throw new FolderError('conflict');
                     return session.save();
                 });
-                void (host.saveWithLock?.(save) ?? save()).then(({status, sourceRemoved}) => {
+                void (host.saveWithLock?.(save) ?? save()).then(({status, sourceRemoved, screenState}) => {
                     const detail = sourceRemoved.length ? ` ${message.sourceRemoved(sourceRemoved)}` : '';
-                    report(message[status] + detail);
+                    const deferred = screenState === 'deferred';
+                    const outcome = deferred && status === 'unchanged' ? message.projectUnchanged : message[status];
+                    report(outcome + (deferred ? ` ${message.workspacePending}` : '') + detail);
                 }, error => fail(locale, error)).finally(renderReload);
                 renderReload();
             }
