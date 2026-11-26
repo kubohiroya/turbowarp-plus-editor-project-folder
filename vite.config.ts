@@ -8,7 +8,7 @@ export default defineConfig({
         minify: false,
         license: {fileName: 'THIRD_PARTY_NOTICES.md'},
         lib: {
-            entry: {index: 'src/index.ts', explorer: 'src/explorer.tsx'},
+            entry: {'snapshot-workflows': 'src/snapshot-workflows.ts', index: 'src/index.ts', explorer: 'src/explorer.tsx'},
             formats: ['es'],
             fileName: (_format, name) => `${name}.js`
         },

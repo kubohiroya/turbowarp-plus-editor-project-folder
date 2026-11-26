@@ -18,6 +18,10 @@
     "./explorer": {
       "types": "./dist/explorer.d.ts",
       "default": "./dist/explorer.js"
+    },
+    "./snapshot-workflows": {
+      "types": "./dist/snapshot-workflows.d.ts",
+      "default": "./dist/snapshot-workflows.js"
     }
   },
   "files": [
@@ -27,7 +31,8 @@
     "tsconfig.json",
     "README.ja.md",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "EDITOR-MIGRATION.md"
   ],
   "publishConfig": {
     "access": "public"
